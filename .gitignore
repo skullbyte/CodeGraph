@@ -1,0 +1,8 @@
+/target
+bench/
+HANDOFF.md
+.claude/codemap.md
+.claude/format.log
+.claude/graph.json
+.claude/graph.bin
+.claude/graph.lock
