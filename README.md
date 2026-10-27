@@ -18,6 +18,9 @@ codegraph watch [dir]        # index, then keep the index fresh as files change 
 ```
 Add `--json` for JSON output and `--dir <root>` to point at another project.
 
+## License
+Apache License 2.0; see [LICENSE](LICENSE).
+
 ## Credit
 Inspired by [Graphify](https://github.com/safishamsi/graphify) (safishamsi/graphify,
 Apache-2.0 + MIT). codegraph is an independent Rust implementation; any logic ported from
