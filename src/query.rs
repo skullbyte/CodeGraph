@@ -164,7 +164,7 @@ fn call_edges(index: &Index) -> Edges {
 }
 
 /// `pub async fn foo` -> `foo`, `export const Cart` -> `Cart`.
-fn bare_name(caller: &str) -> String {
+pub(crate) fn bare_name(caller: &str) -> String {
     caller
         .split_whitespace()
         .last()
@@ -173,7 +173,7 @@ fn bare_name(caller: &str) -> String {
 }
 
 /// File -> files it imports (only imports that resolve to an indexed file).
-fn import_edges(index: &Index) -> Edges {
+pub(crate) fn import_edges(index: &Index) -> Edges {
     let mut edges = Edges::new();
     for file in index.files.values() {
         for imp in &file.imports {
@@ -265,10 +265,10 @@ fn resolve_rust_module<V>(files: &BTreeMap<String, V>, from: &str, imp: &str) ->
         .into_iter()
         .find(|p| files.contains_key(p))
         .or_else(|| {
+            let tails = [format!("{imp}.rs"), format!("{imp}/mod.rs")];
+            let suffixes = tails.clone().map(|tail| format!("/{tail}"));
             let mut matches = files.keys().filter(|p| {
-                [format!("{imp}.rs"), format!("{imp}/mod.rs")]
-                    .iter()
-                    .any(|tail| *p == tail || p.ends_with(&format!("/{tail}")))
+                tails.iter().any(|tail| *p == tail) || suffixes.iter().any(|sfx| p.ends_with(sfx))
             });
             match (matches.next(), matches.next()) {
                 (Some(only), None) => Some(only.clone()),
@@ -533,6 +533,19 @@ mod tests {
             );
         }
         index
+    }
+
+    #[test]
+    fn rust_module_fallback_needs_exactly_one_suffix_match() {
+        let files: BTreeMap<String, ()> = ["a/x.rs", "b/y/mod.rs", "c/z.rs", "d/z.rs", "main.rs"]
+            .iter()
+            .map(|p| (p.to_string(), ()))
+            .collect();
+        let find = |imp: &str| resolve_rust_module(&files, "main.rs", imp);
+        assert_eq!(find("x"), Some("a/x.rs".to_string()));
+        assert_eq!(find("y"), Some("b/y/mod.rs".to_string()));
+        assert_eq!(find("z"), None);
+        assert_eq!(find("w"), None);
     }
 
     #[test]

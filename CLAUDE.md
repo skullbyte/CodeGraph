@@ -31,6 +31,7 @@ Fast offline code-graph CLI in Rust: lets AI agents ask "where is X / who calls 
 - Context > 50% on unfinished work: /handoff, then /clear.
 
 ## Git
+- No Co-Authored-By or other AI attribution in commits or PRs.
 - Conventional Commits (`feat:`, `fix:`, …) via /commit.
 - Never push, force-push or rewrite history unless asked.
 - Never commit secrets, .env or HANDOFF.md.

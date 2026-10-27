@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use codegraph::model::Index;
 use codegraph::query::{Affected, CallerHit, DefHit, Hop, Hub};
-use codegraph::{codemap, index, query, watch};
+use codegraph::{benchmark, codemap, community, index, query, report, watch};
 
 /// Fast offline code graph: where is X, who calls X, how does A reach B.
 #[derive(Parser)]
@@ -58,6 +58,14 @@ enum Command {
     Hubs {
         #[arg(long, default_value_t = 10)]
         top: usize,
+    },
+    /// Write .claude/GRAPH_REPORT.md: key modules, hubs, surprising links, communities.
+    Report,
+    /// Compare codegraph with Graphify (if installed): index time and `explain` answers.
+    Benchmark {
+        /// Symbol to compare on (repeatable); defaults to the 5 top hubs.
+        #[arg(long = "name")]
+        names: Vec<String>,
     },
     /// Index, then keep the index fresh as files change (stop with Ctrl-C).
     Watch {
@@ -120,6 +128,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Hubs { top } => {
             print_results(&query::hubs(&load(&cli.dir)?, *top), cli.json, Hub::text)
         }
+        Command::Report => cmd_report(&cli.dir, cli.json),
+        Command::Benchmark { names } => cmd_benchmark(&cli.dir, names, cli.json),
         Command::Watch { root, interval_ms } => {
             let root = root.as_ref().unwrap_or(&cli.dir);
             cmd_watch(root, Duration::from_millis(*interval_ms))
@@ -272,12 +282,45 @@ fn cwd_has_folder_of(file: &Path) -> bool {
 
 fn write_outputs(root: &Path, idx: &Index) -> Result<()> {
     index::save(root, idx)?;
-    let name = fs::canonicalize(root)?.file_name().map_or_else(
+    let map = root.join(".claude").join("codemap.md");
+    index::write_atomic(&map, codemap::render(&project_name(root)?, idx).as_bytes())
+}
+
+fn project_name(root: &Path) -> Result<String> {
+    Ok(fs::canonicalize(root)?.file_name().map_or_else(
         || "project".to_string(),
         |n| n.to_string_lossy().into_owned(),
-    );
-    let map = root.join(".claude").join("codemap.md");
-    index::write_atomic(&map, codemap::render(&name, idx).as_bytes())
+    ))
+}
+
+fn cmd_benchmark(root: &Path, names: &[String], json: bool) -> Result<()> {
+    let idx = load(root)?;
+    let names: Vec<String> = if names.is_empty() {
+        query::hubs(&idx, 5).into_iter().map(|h| h.name).collect()
+    } else {
+        names.to_vec()
+    };
+    let outcome = benchmark::run(root, idx.files.len(), &names)?;
+    if json {
+        println!("{}", serde_json::to_string(&outcome)?);
+    } else {
+        outcome.lines().iter().for_each(|line| println!("{line}"));
+    }
+    Ok(())
+}
+
+fn cmd_report(root: &Path, json: bool) -> Result<()> {
+    let idx = load(root)?;
+    if json {
+        let found = community::detect(&community::file_graph(&idx));
+        println!("{}", serde_json::to_string(&found)?);
+        return Ok(());
+    }
+    let path = root.join(".claude").join("GRAPH_REPORT.md");
+    index::write_atomic(&path, report::render(&project_name(root)?, &idx).as_bytes())?;
+    let count = community::detect(&community::file_graph(&idx)).len();
+    println!("wrote .claude/GRAPH_REPORT.md ({count} communities)");
+    Ok(())
 }
 
 fn load(root: &Path) -> Result<Index> {

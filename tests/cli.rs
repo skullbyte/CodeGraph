@@ -236,3 +236,53 @@ fn watch_reindexes_added_modified_and_deleted_files() {
     fs::remove_file(&file).unwrap();
     wait_for("deleted file", &|| def_is("renamed", ""));
 }
+
+#[test]
+fn report_writes_graph_report_and_json_lists_communities() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let out = run(dir.path(), &["report"]);
+    assert!(out.status.success());
+    assert_eq!(
+        stdout(&out).trim(),
+        "wrote .claude/GRAPH_REPORT.md (1 communities)"
+    );
+    let report = fs::read_to_string(dir.path().join(".claude/GRAPH_REPORT.md")).unwrap();
+    assert!(report.contains("## Key modules"));
+    assert!(report.contains("`src/app.ts` - 1 links"));
+
+    let json = stdout(&run(dir.path(), &["report", "--json"]));
+    assert!(
+        json.contains(r#""files":["src/app.ts","src/lib.rs"]"#),
+        "{json}"
+    );
+}
+
+#[test]
+fn report_without_index_fails_with_hint() {
+    let dir = project();
+    let out = run(dir.path(), &["report"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("codegraph index"));
+}
+
+#[test]
+fn benchmark_without_graphify_reports_codegraph_only() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_codegraph"))
+        .args(["benchmark", "--name", "beta", "--dir"])
+        .arg(dir.path())
+        .env("PATH", "")
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "files 2");
+    assert!(lines[1].starts_with("index  codegraph "), "{text}");
+    assert_eq!(lines[2], "graphify: not found");
+    assert!(lines[3].starts_with("explain beta  codegraph "), "{text}");
+    assert!(lines[3].ends_with(" ms ok"), "{text}");
+    assert!(!dir.path().join("graphify-out").exists());
+}
