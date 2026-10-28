@@ -1,7 +1,7 @@
 # codegraph progress
 
 ## Now
-Goal: Phase 4 (more languages), plan approved. Phase 3 done. JavaScript, Python, Java committed; next C# and Go.
+Goal: Phase 4 (more languages), plan approved. Phase 3 done. JavaScript, Python, Java, C#, Go committed; next C/C++.
 State: Phases 1-2 done. html = 3 commits (d10f627 first page, c4de95b offline 3D space view, 50d60cf accessibility/keyboard fixes); review loop ended with "no remaining issues"; tested in Brave. `just check` green: 97 unit + 18 end-to-end tests; tree clean. `origin` = github.com/skullbyte/GraphGraph (fresh repo, the user pushes). History was rewritten on 2026-10-29 (identity), so all commit hashes changed.
 Next step: mermaid done and committed (75af0b9, 6009b3c); step 3 obsidian done and committed. Phase 3 complete; stop for the user OK before Phase 4 (more languages), per ~/.claude/plans/floating-munching-lantern.md; tick the Graphify checklist and refresh it as features land.
 
@@ -16,7 +16,8 @@ Next step: mermaid done and committed (75af0b9, 6009b3c); step 3 obsidian done a
   - [x] JavaScript (.js .jsx .mjs .cjs; TSX grammar, `require('./x')` imports)
   - [x] Python (src/lang/python.rs, shared walker src/lang/generic.rs; deps added by the user)
   - [x] Java (src/lang/java.rs; imports resolve to a unique `a/b/C.java`)
-  - [ ] C#, Go, C/C++
+  - [x] C# (src/lang/csharp.rs) and Go (src/lang/golang.rs): no import edges (namespace / package, not a file); link through calls only
+  - [ ] C/C++
 - [ ] Phase 5 (A.5) Precision: SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
 - [ ] Phase 6 (A.6) Claude Code integration: MCP server, skill, hook; replace codemap.sh/callers.sh only if benchmarks win
 - [ ] Phase 7 (A.7) Documents: semantic pass over docs/PDFs/markdown via a skill

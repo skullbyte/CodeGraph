@@ -1,6 +1,8 @@
 //! Language support: one file per language, chosen by file extension.
 
+pub mod csharp;
 pub mod generic;
+pub mod golang;
 pub mod java;
 pub mod python;
 pub mod rust;
@@ -29,6 +31,8 @@ pub enum Lang {
     JavaScript,
     Python,
     Java,
+    CSharp,
+    Go,
 }
 
 impl Lang {
@@ -42,6 +46,8 @@ impl Lang {
             "tsx" => Some(Lang::Tsx),
             "py" => Some(Lang::Python),
             "java" => Some(Lang::Java),
+            "cs" => Some(Lang::CSharp),
+            "go" => Some(Lang::Go),
             "js" | "jsx" | "mjs" | "cjs" => Some(Lang::JavaScript),
             _ => None,
         }
@@ -53,6 +59,8 @@ impl Lang {
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::Java => tree_sitter_java::LANGUAGE.into(),
+            Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Lang::Go => tree_sitter_go::LANGUAGE.into(),
             Lang::Tsx | Lang::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
@@ -72,6 +80,8 @@ pub fn extract(lang: Lang, src: &str) -> Result<Facts> {
         }
         Lang::Python => python::extract(tree.root_node(), src),
         Lang::Java => java::extract(tree.root_node(), src),
+        Lang::CSharp => csharp::extract(tree.root_node(), src),
+        Lang::Go => golang::extract(tree.root_node(), src),
     };
     facts.imports.sort();
     facts.imports.dedup();
