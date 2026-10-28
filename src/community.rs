@@ -115,10 +115,10 @@ pub fn detect(graph: &FileGraph) -> Vec<Community> {
         *adj[b].entry(a).or_insert(0.0) += f64::from(w);
     }
     let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (file, group) in louvain(adj).into_iter().enumerate() {
+    for (file, group) in louvain(adj.clone()).into_iter().enumerate() {
         groups.entry(group).or_default().push(file);
     }
-    let mut groups: Vec<Vec<usize>> = groups.into_values().collect();
+    let mut groups = refine(groups.into_values().collect(), &adj, &graph.edges);
     groups.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
     let mut community_of = vec![0; n];
     for (id, members) in groups.iter().enumerate() {
@@ -141,6 +141,74 @@ pub fn detect(graph: &FileGraph) -> Vec<Community> {
             files: members.iter().map(|&m| graph.files[m].clone()).collect(),
         })
         .collect()
+}
+
+// Splitting rules ported from Graphify's `cluster.py` (`_MAX_COMMUNITY_FRACTION`, `_MIN_SPLIT_SIZE`,
+// `_COHESION_SPLIT_THRESHOLD`, `_COHESION_SPLIT_MIN_SIZE`); Louvain alone can leave one big loose
+// cluster (tokio: 188 of 814 files, cohesion 0.03).
+/// A group bigger than this share (1/n) of all files is split.
+const MAX_SHARE_DIVISOR: usize = 4;
+const MIN_SPLIT_SIZE: usize = 10;
+/// A group of at least `COHESION_SPLIT_MIN_SIZE` files with less cohesion than this is split.
+const COHESION_SPLIT_BELOW: f64 = 0.05;
+const COHESION_SPLIT_MIN_SIZE: usize = 50;
+
+/// Split oversized groups, then loosely linked big ones, by running Louvain on each one alone.
+fn refine(
+    groups: Vec<Vec<usize>>,
+    adj: &Adj,
+    edges: &BTreeMap<(usize, usize), u32>,
+) -> Vec<Vec<usize>> {
+    let max_size = MIN_SPLIT_SIZE.max(adj.len() / MAX_SHARE_DIVISOR);
+    let by_size = groups.into_iter().flat_map(|g| {
+        if g.len() > max_size {
+            split_group(adj, &g)
+        } else {
+            vec![g]
+        }
+    });
+    by_size
+        .flat_map(|g| {
+            if g.len() >= COHESION_SPLIT_MIN_SIZE
+                && group_cohesion(&g, edges) < COHESION_SPLIT_BELOW
+            {
+                split_group(adj, &g)
+            } else {
+                vec![g]
+            }
+        })
+        .collect()
+}
+
+fn group_cohesion(members: &[usize], edges: &BTreeMap<(usize, usize), u32>) -> f64 {
+    let inside: std::collections::HashSet<usize> = members.iter().copied().collect();
+    let linked = edges
+        .keys()
+        .filter(|(a, b)| inside.contains(a) && inside.contains(b))
+        .count();
+    cohesion(members.len(), linked)
+}
+
+/// `members` re-clustered on their own links; the group itself when that finds no split.
+fn split_group(adj: &Adj, members: &[usize]) -> Vec<Vec<usize>> {
+    let local: HashMap<usize, usize> = members.iter().enumerate().map(|(i, &m)| (m, i)).collect();
+    let sub: Adj = members
+        .iter()
+        .map(|&m| {
+            adj[m]
+                .iter()
+                .filter_map(|(other, &w)| local.get(other).map(|&i| (i, w)))
+                .collect()
+        })
+        .collect();
+    let mut parts: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (i, part) in louvain(sub).into_iter().enumerate() {
+        parts.entry(part).or_default().push(members[i]);
+    }
+    if parts.len() < 2 {
+        return vec![members.to_vec()];
+    }
+    parts.into_values().collect()
 }
 
 fn cohesion(files: usize, linked: usize) -> f64 {
@@ -369,5 +437,87 @@ mod tests {
     #[test]
     fn empty_graph_has_no_communities() {
         assert!(detect(&FileGraph::default()).is_empty());
+    }
+
+    /// `total` nodes wired by `links`; nodes no link mentions stay alone.
+    fn adj_of(total: usize, links: &[(usize, usize)]) -> Adj {
+        let mut adj: Adj = vec![BTreeMap::new(); total];
+        for &(a, b) in links {
+            *adj[a].entry(b).or_insert(0.0) += 1.0;
+            *adj[b].entry(a).or_insert(0.0) += 1.0;
+        }
+        adj
+    }
+
+    fn edge_map(links: &[(usize, usize)]) -> BTreeMap<(usize, usize), u32> {
+        links
+            .iter()
+            .map(|&(a, b)| ((a.min(b), a.max(b)), 1))
+            .collect()
+    }
+
+    fn clique(nodes: std::ops::Range<usize>) -> Vec<(usize, usize)> {
+        nodes
+            .clone()
+            .flat_map(|a| (a + 1..nodes.end).map(move |b| (a, b)))
+            .collect()
+    }
+
+    #[test]
+    fn split_group_separates_two_cliques_joined_by_one_bridge() {
+        let mut links = clique(0..5);
+        links.extend(clique(5..10));
+        links.push((4, 5));
+        let adj = adj_of(10, &links);
+        let parts = split_group(&adj, &(0..10).collect::<Vec<_>>());
+        assert_eq!(parts, vec![vec![0, 1, 2, 3, 4], vec![5, 6, 7, 8, 9]]);
+        // One tight clique stays whole.
+        let one = split_group(&adj_of(5, &clique(0..5)), &[0, 1, 2, 3, 4]);
+        assert_eq!(one, vec![vec![0, 1, 2, 3, 4]]);
+    }
+
+    /// Two stars of 30 leaves (hubs 0 and 30) joined by their hubs: 59 links among 60 files.
+    fn two_stars() -> Vec<(usize, usize)> {
+        let mut links: Vec<_> = (1..30).map(|leaf| (0, leaf)).collect();
+        links.extend((31..60).map(|leaf| (30, leaf)));
+        links.push((0, 30));
+        links
+    }
+
+    #[test]
+    fn a_sparse_big_group_is_split_but_a_dense_one_is_not() {
+        // 400 other lone files keep the 60-file group under the 25% size rule: only cohesion decides.
+        let total = 460;
+        let everyone: Vec<usize> = (0..60).collect();
+        let lone = || (60..total).map(|i| vec![i]);
+
+        let sparse = two_stars();
+        let groups = std::iter::once(everyone.clone()).chain(lone()).collect();
+        let refined = refine(groups, &adj_of(total, &sparse), &edge_map(&sparse));
+        assert!(
+            refined.len() > 401,
+            "sparse group (cohesion 0.03) should split"
+        );
+
+        let band: Vec<_> = (0..60)
+            .flat_map(|a| (a + 1..60.min(a + 11)).map(move |b| (a, b)))
+            .collect();
+        let groups = std::iter::once(everyone).chain(lone()).collect();
+        let refined = refine(groups, &adj_of(total, &band), &edge_map(&band));
+        assert_eq!(
+            refined.len(),
+            401,
+            "dense group (cohesion 0.15) stays whole"
+        );
+    }
+
+    #[test]
+    fn a_group_over_a_quarter_of_the_files_is_split_by_size() {
+        let mut links = clique(0..6);
+        links.extend(clique(6..12));
+        links.push((5, 6));
+        let groups = vec![(0..12).collect::<Vec<_>>()];
+        let refined = refine(groups, &adj_of(12, &links), &edge_map(&links));
+        assert_eq!(refined.len(), 2);
     }
 }

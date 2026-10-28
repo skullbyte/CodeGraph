@@ -33,7 +33,9 @@ tooling, says which function each call really goes to, so calls into the standar
     scip-typescript index            # TypeScript/JavaScript: writes index.scip
     codegraph index && codegraph scip
 
-When one name has several project definitions, `callers` adds `-> path:line` to say which one.
+When one name has several project definitions, `callers` adds `-> path:line` to say which one,
+and `hubs` lists each definition on its own. `codegraph scip` also says how many files the index
+did not cover (code behind cfg flags the indexer skipped); their calls keep name matching.
 Re-parsing a changed file forgets its answers until `codegraph scip` runs again, and the
 `-> path:line` of a definition is where it was when the index was made: re-run `codegraph scip`
 after editing.

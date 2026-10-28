@@ -102,6 +102,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    quiet_on_closed_pipe();
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -109,6 +110,22 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Rust ignores SIGPIPE, so `println!` into a closed pipe (`codegraph callers x | head`) panics.
+/// A reader that hangs up is not an error: exit quietly.
+fn quiet_on_closed_pipe() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if is_broken_pipe(&info.to_string()) {
+            std::process::exit(0);
+        }
+        default(info);
+    }));
+}
+
+fn is_broken_pipe(panic_message: &str) -> bool {
+    panic_message.contains("failed printing to stdout") && panic_message.contains("Broken pipe")
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -404,6 +421,17 @@ fn cmd_scip(root: &Path, file: Option<&Path>, json: bool) -> Result<()> {
             stats.unknown_documents
         );
     }
+    if stats.uncovered_files > 0 {
+        let files = if stats.uncovered_files == 1 {
+            "file"
+        } else {
+            "files"
+        };
+        print!(
+            "; no index document for {} {files} ({} calls): they keep name matching",
+            stats.uncovered_files, stats.uncovered_calls
+        );
+    }
     println!();
     Ok(())
 }
@@ -428,4 +456,20 @@ fn print_results<T: Serialize>(items: &[T], json: bool, text: fn(&T) -> String) 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_broken_pipe;
+
+    #[test]
+    fn only_a_closed_stdout_counts_as_a_broken_pipe() {
+        assert!(is_broken_pipe(
+            "panicked at stdio.rs:1168:9:\nfailed printing to stdout: Broken pipe (os error 32)"
+        ));
+        assert!(!is_broken_pipe("panicked: index out of bounds"));
+        assert!(!is_broken_pipe(
+            "failed printing to stdout: No space left on device"
+        ));
+    }
 }

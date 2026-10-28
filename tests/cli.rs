@@ -432,12 +432,16 @@ fn scip_resolves_calls_and_reports() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(stdout(&out), "resolved 1 of 1 calls (0 external)\n");
+    // src/app.ts also calls something, but the index has no document for it.
+    assert_eq!(
+        stdout(&out),
+        "resolved 1 of 1 calls (0 external); no index document for 1 file (1 calls): they keep name matching\n"
+    );
 
     let json = stdout(&run(dir.path(), &["scip", "--json"]));
     assert_eq!(
         json.trim(),
-        r#"{"calls":1,"resolved":1,"external":0,"unknown_documents":0}"#
+        r#"{"calls":1,"resolved":1,"external":0,"unknown_documents":0,"uncovered_files":1,"uncovered_calls":1}"#
     );
     // A reference with no definition in the project is the standard library or a dependency.
     let external = scip_bytes("src/lib.rs", &[(2, "r c core 1 lib/alpha().", false)]);
@@ -446,4 +450,30 @@ fn scip_resolves_calls_and_reports() {
     assert_eq!(stdout(&run(dir.path(), &["callers", "alpha"])), "");
     let bad = run(dir.path(), &["scip", "missing.scip"]);
     assert!(!bad.status.success());
+}
+
+#[test]
+fn closed_stdout_ends_quietly() {
+    // ~150 KB of output: more than a pipe holds, so the child is still writing when we hang up.
+    let dir = tempfile::tempdir().unwrap();
+    let src: String = (0..4000)
+        .map(|i| format!("pub fn f{i}() {{ f{}(); }}\n", i + 1))
+        .collect();
+    fs::write(dir.path().join("lib.rs"), src).unwrap();
+    run(dir.path(), &["index"]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codegraph"))
+        .args(["hubs", "--top", "4000", "--dir"])
+        .arg(dir.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

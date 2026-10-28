@@ -1,6 +1,6 @@
 //! Answers def, callers and path questions over an `Index`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 
@@ -577,26 +577,98 @@ pub fn affected(index: &Index, name: &str, max_depth: Option<usize>) -> Vec<Affe
     out
 }
 
+/// A hub candidate: a name, plus its definition when the name has several and SCIP told them apart.
+type HubKey = (String, Option<(String, u32)>);
+
 /// The `top` most-connected project symbols (distinct project callers + distinct project callees).
-/// Names defined nowhere in the project, like `println` or `new`, are left out.
+/// Names defined nowhere in the project, like `println` or `new`, are left out. Once `codegraph scip`
+/// has run, same-named definitions (every `new`) are separate hubs; a call SCIP did not resolve to
+/// such a name cannot be attributed and is skipped.
 pub fn hubs(index: &Index, top: usize) -> Vec<Hub> {
     let locs = locations(index);
-    let fwd = call_edges(index);
-    let rev = reverse(&fwd);
-    let count = |edges: &Edges, name: &str| {
-        edges.get(name).map_or(0, |set| {
+    let defined = definition_counts(index);
+    // Languages for which `codegraph scip` has run; others keep counting by name.
+    let scip_languages: HashSet<String> = index
+        .files
+        .values()
+        .filter(|f| !f.resolved.is_empty())
+        .map(|f| scip_family(&f.path))
+        .collect();
+    let key =
+        |file: &FileEntry, name: &str, def: Option<(&str, u32)>, caller: bool| -> Option<HubKey> {
+            let by_name = (name.to_string(), None);
+            if defined.get(name).copied().unwrap_or(0) < 2
+                || !scip_languages.contains(&scip_family(&file.path))
+            {
+                return Some(by_name);
+            }
+            let attributed = def.and_then(|(path, line)| {
+                let own = if path == file.path {
+                    file
+                } else {
+                    index.files.get(path)?
+                };
+                // SCIP gives the identifier's line; our symbol starts at its declaration.
+                let at = own
+                    .symbols
+                    .iter()
+                    .filter(|s| s.name == name && s.kind != Kind::Impl && s.line <= line)
+                    .map(|s| s.line)
+                    .max()?;
+                Some((name.to_string(), Some((own.path.clone(), at))))
+            });
+            // A caller we cannot place (a nested fn the extractor named but did not list) keeps its
+            // name; a call we cannot attribute to one of several definitions is left out.
+            attributed.or(caller.then_some(by_name))
+        };
+    let mut fwd: HashMap<HubKey, HashSet<HubKey>> = HashMap::new();
+    let mut rev: HashMap<HubKey, HashSet<HubKey>> = HashMap::new();
+    for file in index.files.values() {
+        for (call, target) in file.graph_calls() {
+            let Some(caller) = call.caller.as_deref().map(bare_name) else {
+                continue;
+            };
+            let callee_def = match target {
+                Some(Resolution::Def { path, line }) => Some((path.as_str(), *line)),
+                _ => None,
+            };
+            let from = key(file, &caller, Some((file.path.as_str(), call.line)), true);
+            let to = key(file, &call.callee, callee_def, false);
+            let (Some(from), Some(to)) = (from, to) else {
+                continue;
+            };
+            if from != to {
+                fwd.entry(from.clone()).or_default().insert(to.clone());
+                rev.entry(to).or_default().insert(from);
+            }
+        }
+    }
+    let count = |edges: &HashMap<HubKey, HashSet<HubKey>>, node: &HubKey| {
+        edges.get(node).map_or(0, |set| {
             set.iter()
-                .filter(|n| n.as_str() != name && locs.contains_key(n.as_str()))
+                .filter(|n| locs.contains_key(n.0.as_str()))
                 .count()
         })
     };
-    let mut hubs: Vec<Hub> = locs
-        .iter()
-        .map(|(name, loc)| Hub {
-            name: name.to_string(),
-            location: loc.clone(),
-            incoming: count(&rev, name),
-            outgoing: count(&fwd, name),
+    let nodes: HashSet<&HubKey> = fwd.keys().chain(rev.keys()).collect();
+    let mut hubs: Vec<Hub> = nodes
+        .into_iter()
+        .filter_map(|node| {
+            let many = defined.get(node.0.as_str()).copied().unwrap_or(0);
+            let location = match &node.1 {
+                Some((path, line)) => format!("{path}:{line}"),
+                // Calls kept by name next to per-definition rows: no single place to point at.
+                None if many > 1 && !scip_languages.is_empty() => {
+                    format!("(by name, {many} definitions)")
+                }
+                None => locs.get(node.0.as_str())?.clone(),
+            };
+            Some(Hub {
+                name: node.0.clone(),
+                location,
+                incoming: count(&rev, node),
+                outgoing: count(&fwd, node),
+            })
         })
         .filter(|h| h.incoming + h.outgoing > 0)
         .collect();
@@ -604,9 +676,30 @@ pub fn hubs(index: &Index, top: usize) -> Vec<Hub> {
         (b.incoming + b.outgoing)
             .cmp(&(a.incoming + a.outgoing))
             .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.location.cmp(&b.location))
     });
     hubs.truncate(top);
     hubs
+}
+
+/// Files one SCIP indexer covers together (scip-typescript reads .ts, .tsx and .js; clang, C and C++).
+fn scip_family(path: &str) -> String {
+    match Lang::from_path(path) {
+        Some(Lang::TypeScript | Lang::Tsx | Lang::JavaScript) => "ts".to_string(),
+        Some(Lang::C | Lang::Cpp | Lang::Header) => "c".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Name -> how many project definitions it has (`impl` blocks don't count).
+fn definition_counts(index: &Index) -> HashMap<&str, usize> {
+    let mut counts = HashMap::new();
+    for file in index.files.values() {
+        for s in file.symbols.iter().filter(|s| s.kind != Kind::Impl) {
+            *counts.entry(s.name.as_str()).or_default() += 1;
+        }
+    }
+    counts
 }
 
 #[cfg(test)]
@@ -966,6 +1059,72 @@ mod tests {
             .collect();
         assert_eq!(who, vec!["two"]);
         assert_eq!(explain(&index, "b").incoming.len(), 1);
+    }
+
+    fn hub_rows(index: &Index) -> Vec<(String, String, usize, usize)> {
+        hubs(index, 20)
+            .into_iter()
+            .map(|h| (h.name, h.location, h.incoming, h.outgoing))
+            .collect()
+    }
+
+    fn two_news() -> Index {
+        index_of(&[
+            ("a.rs", "fn new() {}\nfn run_a() { new(); }\n"),
+            ("b.rs", "fn new() {}\nfn run_b() { new(); }\n"),
+            ("c.rs", "fn run_c() { new(); }\n"),
+        ])
+    }
+
+    #[test]
+    fn hubs_split_same_named_definitions_once_scip_knows_which_is_which() {
+        let mut index = two_news();
+        // Without SCIP data the three `new` calls are one name: legacy behaviour.
+        let legacy = hub_rows(&index);
+        assert_eq!(legacy[0], ("new".into(), "a.rs:1".into(), 3, 0));
+        resolve(&mut index, "a.rs", 0, def_at("a.rs", 1));
+        resolve(&mut index, "b.rs", 0, def_at("b.rs", 1));
+        // run_c's call is unresolved and `new` has two definitions: ambiguous, left out.
+        assert_eq!(
+            hub_rows(&index),
+            vec![
+                ("new".into(), "a.rs:1".into(), 1, 0),
+                ("new".into(), "b.rs:1".into(), 1, 0),
+                ("run_a".into(), "a.rs:2".into(), 0, 1),
+                ("run_b".into(), "b.rs:2".into(), 0, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_language_without_scip_data_keeps_name_level_hubs_in_a_mixed_project() {
+        let mut index = two_news();
+        resolve(&mut index, "a.rs", 0, def_at("a.rs", 1));
+        resolve(&mut index, "b.rs", 0, def_at("b.rs", 1));
+        let py = index_of(&[("p.py", "def go():\n    new()\n")]);
+        index.files.insert("p.py".into(), py.files["p.py"].clone());
+        let rows = hub_rows(&index);
+        // Rust has SCIP data, so run_c's unresolved call is still left out ...
+        assert!(rows.iter().all(|r| r.0 != "run_c"), "{rows:?}");
+        // ... but the Python caller of the same-named `new` is counted by name, as before.
+        assert!(
+            rows.contains(&("go".into(), "p.py:1".into(), 0, 1)),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn hubs_keep_counting_unresolved_calls_to_a_name_with_one_definition() {
+        let mut index = index_of(&[(
+            "a.rs",
+            "fn helper() {}\nfn go() { helper(); }\nfn other() { x(); }\nfn x() {}\n",
+        )]);
+        resolve(&mut index, "a.rs", 1, def_at("a.rs", 4));
+        let rows = hub_rows(&index);
+        assert!(
+            rows.contains(&("helper".into(), "a.rs:1".into(), 1, 0)),
+            "{rows:?}"
+        );
     }
 
     #[test]

@@ -41,6 +41,10 @@ pub struct Stats {
     pub external: usize,
     /// Index documents with no matching indexed file (the indexer ran from another root?).
     pub unknown_documents: usize,
+    /// Indexed files with calls that no index document covers (code behind cfg flags or features
+    /// the indexer skipped); their calls keep name matching.
+    pub uncovered_files: usize,
+    pub uncovered_calls: usize,
 }
 
 /// Attach to every call of `index` what the SCIP `docs` say it refers to. A call is matched to the
@@ -65,6 +69,7 @@ pub fn apply(index: &mut Index, docs: &[Document]) -> Stats {
             .extend(&doc.occurrences);
     }
     let mut stats = Stats::default();
+    let mut covered = std::collections::HashSet::new();
     for (path, mut occurrences) in by_path {
         occurrences.sort_by_key(|o| (o.line, o.col, o.symbol, o.definition));
         occurrences.dedup_by_key(|o| (o.line, o.col, o.symbol, o.definition));
@@ -107,6 +112,17 @@ pub fn apply(index: &mut Index, docs: &[Document]) -> Stats {
         resolved.sort_by_key(|r| r.call);
         stats.resolved += resolved.len();
         file.resolved = resolved;
+        covered.insert(path);
+    }
+    for (path, file) in &mut index.files {
+        if !covered.contains(path.as_str()) {
+            // An earlier run may have covered it; this index says nothing, so forget those answers.
+            file.resolved.clear();
+            if !file.calls.is_empty() {
+                stats.uncovered_files += 1;
+                stats.uncovered_calls += file.calls.len();
+            }
+        }
     }
     stats
 }
@@ -127,10 +143,13 @@ fn last_name(symbol: &str) -> Option<String> {
     let mut last = None;
     while let Some(&(_, c)) = chars.peek() {
         match c {
-            // `[T]` type parameter, `(x)` parameter: not what the symbol is called.
+            // `[T]` type parameter, `(x)` parameter: not what the symbol is called. Their names
+            // may be in backticks too (``impl#[`[T]`]len().``), so read them like any name.
             '[' | '(' => {
                 let close = if c == '[' { ']' } else { ')' };
-                chars.by_ref().find(|&(_, d)| d == close);
+                chars.next();
+                read_name(&mut chars)?;
+                (chars.next()?.1 == close).then_some(())?;
             }
             _ => {
                 let name = read_name(&mut chars)?;
@@ -528,6 +547,24 @@ mod tests {
     }
 
     #[test]
+    fn backticks_inside_type_parameters_and_parameters() {
+        let name = |s: &str| last_name(s);
+        assert_eq!(
+            name("rust-analyzer cargo core 1.0 slice/impl#[`[T]`]len()."),
+            Some("len".into())
+        );
+        assert_eq!(
+            name("rust-analyzer cargo p 1 m/impl#[`Foo<T>`]new()."),
+            Some("new".into())
+        );
+        assert_eq!(
+            name("rust-analyzer cargo p 1 m/f().(`a)b`)"),
+            Some("f".into())
+        );
+        assert_eq!(name("rust-analyzer cargo p 1 m/f().(x"), None);
+    }
+
+    #[test]
     fn symbol_names() {
         let name = |s: &str| last_name(s);
         assert_eq!(
@@ -581,6 +618,48 @@ mod tests {
             col,
             ..occ(line, symbol, false)
         }
+    }
+
+    #[test]
+    fn files_the_index_does_not_cover_are_counted() {
+        let mut index = rust_index("fn run() { f(); }\n");
+        let other = rust_index("fn x() { a(); b(); }\nfn y() {}\n")
+            .files
+            .remove("a.rs")
+            .unwrap();
+        index.files.insert(
+            "loom.rs".into(),
+            crate::model::FileEntry {
+                path: "loom.rs".into(),
+                ..other
+            },
+        );
+        index.files.insert(
+            "empty.rs".into(),
+            crate::model::FileEntry {
+                path: "empty.rs".into(),
+                ..Default::default()
+            },
+        );
+        let docs = [Document {
+            path: "a.rs",
+            occurrences: vec![occ(0, "r c p 1 a/f().", false)],
+        }];
+        let stats = apply(&mut index, &docs);
+        assert_eq!((stats.uncovered_files, stats.uncovered_calls), (1, 2));
+    }
+
+    #[test]
+    fn a_rerun_that_no_longer_covers_a_file_forgets_its_old_answers() {
+        let mut index = rust_index("fn run() { f(); }\n");
+        let docs = [Document {
+            path: "a.rs",
+            occurrences: vec![occ(0, "r c p 1 a/f().", false)],
+        }];
+        assert_eq!(apply(&mut index, &docs).resolved, 1);
+        let stats = apply(&mut index, &[]);
+        assert!(index.files["a.rs"].resolved.is_empty());
+        assert_eq!((stats.uncovered_files, stats.uncovered_calls), (1, 1));
     }
 
     #[test]
@@ -649,7 +728,7 @@ mod tests {
                 calls: 2,
                 resolved: 2,
                 external: 1,
-                unknown_documents: 0
+                ..Stats::default()
             }
         );
         let file = &index.files["a.rs"];
@@ -684,7 +763,7 @@ mod tests {
                 calls: 2,
                 resolved: 2,
                 external: 1,
-                unknown_documents: 0
+                ..Stats::default()
             }
         );
         let file = &index.files["a.rs"];
