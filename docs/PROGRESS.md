@@ -1,9 +1,9 @@
 # codegraph progress
 
 ## Now
-Goal: Phase 4 (more languages), plan approved. Phase 3 done. JavaScript, Python, Java, C#, Go committed; next C/C++.
-State: Phases 1-2 done. html = 3 commits (d10f627 first page, c4de95b offline 3D space view, 50d60cf accessibility/keyboard fixes); review loop ended with "no remaining issues"; tested in Brave. `just check` green: 97 unit + 18 end-to-end tests; tree clean. `origin` = github.com/skullbyte/GraphGraph (fresh repo, the user pushes). History was rewritten on 2026-10-29 (identity), so all commit hashes changed.
-Next step: mermaid done and committed (75af0b9, 6009b3c); step 3 obsidian done and committed. Phase 3 complete; stop for the user OK before Phase 4 (more languages), per ~/.claude/plans/floating-munching-lantern.md; tick the Graphify checklist and refresh it as features land.
+Goal: Phase 4 (more languages) is DONE and committed. Phases 1-4 done. Next: Phase 5 (SCIP precision), after the user OK.
+State: 8 language families indexed (Rust, TS/TSX, JS, Python, Java, C#, Go, C/C++). `just check` green: 124 unit + 19 end-to-end tests. `origin` = github.com/skullbyte/GraphGraph (the user pushes). Commit hashes changed on 2026-10-29 (identity rewrite).
+Next step: stop for the user OK, then Phase 5 (A.5): import SCIP from rust-analyzer / scip-typescript to fix name-based matching (see docs/REQUIREMENTS.md); plan first. Keep the Graphify checklist refreshed as features land.
 
 ## Checklist
 - [x] Phase 1 (A.1) core engine: Rust + TS/TSX extraction, walker, parallel incremental index, codemap/graph.json/graph.bin, index/update/watch/def/callers/explain/path/affected/hubs, tsconfig aliases, benchmarks (done 2026-10-27)
@@ -12,12 +12,12 @@ Next step: mermaid done and committed (75af0b9, 6009b3c); step 3 obsidian done a
   - [x] `codegraph html`: offline 3D space view + Graphify web features, reviewed, committed (d10f627, c4de95b, 50d60cf)
   - [x] Mermaid callflow export: `codegraph mermaid <name> [--depth 2]` (src/mermaid.rs, reviewed, committed)
   - [x] Obsidian vault export: `codegraph obsidian [--out DIR]` (src/obsidian.rs, reviewed, committed)
-- [ ] Phase 4 (A.4) More languages: plan in ~/.claude/plans/glowing-skipping-mountain.md
+- [x] Phase 4 (A.4) More languages: Rust, TS/TSX, JS, Python, Java, C#, Go, C/C++ (plan in ~/.claude/plans/glowing-skipping-mountain.md)
   - [x] JavaScript (.js .jsx .mjs .cjs; TSX grammar, `require('./x')` imports)
   - [x] Python (src/lang/python.rs, shared walker src/lang/generic.rs; deps added by the user)
   - [x] Java (src/lang/java.rs; imports resolve to a unique `a/b/C.java`)
   - [x] C# (src/lang/csharp.rs) and Go (src/lang/golang.rs): no import edges (namespace / package, not a file); link through calls only
-  - [ ] C/C++
+  - [x] C/C++ (src/lang/c.rs, one table; `.h` uses the C++ grammar; known gaps: K&R functions and C++ keywords used as C identifiers in `.h` files, multi-name typedefs)
 - [ ] Phase 5 (A.5) Precision: SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
 - [ ] Phase 6 (A.6) Claude Code integration: MCP server, skill, hook; replace codemap.sh/callers.sh only if benchmarks win
 - [ ] Phase 7 (A.7) Documents: semantic pass over docs/PDFs/markdown via a skill
@@ -58,7 +58,7 @@ Commands:
 Analysis:
 - [~] communities: Louvain only (Graphify: Leiden + Louvain fallback, oversized-community split skipped), file-level
 - [x] god nodes, surprising links; [ ] suggested questions, dedup (`dedup.py`, MinHash)
-- [~] languages: Rust + TS/TSX of ~30 (`G/extractors/`) -> Phase 4
+- [~] languages: Rust, TS/TSX, JS, Python, Java, C#, Go, C/C++ of ~30 (`G/extractors/`); others (Ruby, PHP, Kotlin, Swift, ...) on request
 - [ ] resolution passes (symbol/interface/cross-repo, `extractors/resolution.py`), SCIP ingest (`scip_ingest.py`) -> Phase 5
 - [ ] project config `.graphifyrc`, query log, security caps (URL/SSRF, size limits) -> Part B
 
@@ -110,3 +110,5 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
   - untested: `benchmark` with Graphify installed, `benchmark --json`, multi-level Louvain with weighted edges
   - `benchmark` explain answers read the saved index, which can be older than the cold build it times
   - tokio communities are lumpy (biggest 179 files, name-match noise like `new_v4`): Phase 5 fixes the cause; Graphify's oversized-community split was skipped
+
+- 2026-10-30 Phase 4: one table-driven walker (`src/lang/generic.rs`, idea from Graphify's `LanguageConfig`) plus a small module per language; JS reuses the TSX grammar; C and C++ share one table and `.h` uses the C++ grammar; C#/Go record no imports (namespace/package, not files); after Phase 4 tokio cached index 26 ms, update 20 ms (unchanged), release binary 20 MB

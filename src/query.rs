@@ -215,6 +215,7 @@ fn resolve_import<V>(
         Some(Lang::Rust) => resolve_rust_module(files, from, imp),
         Some(Lang::Python) => resolve_python_module(files, from, imp),
         Some(Lang::Java) => resolve_java_class(files, imp),
+        Some(Lang::C | Lang::Cpp) => resolve_include(files, from, imp),
         _ => resolve_ts_import(files, aliases, from, imp),
     }
 }
@@ -302,6 +303,16 @@ fn resolve_python_module<V>(files: &BTreeMap<String, V>, from: &str, imp: &str) 
 fn resolve_java_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<String> {
     let path = format!("{}.java", imp.replace('.', "/"));
     single_suffix_match(files, &[path])
+}
+
+/// `#include "x.h"`: next to the including file first, else the one project file with that path.
+fn resolve_include<V>(files: &BTreeMap<String, V>, from: &str, imp: &str) -> Option<String> {
+    let dir = from.rsplit_once('/').map_or("", |(d, _)| d);
+    let near = normalize(&format!("{dir}/{imp}"));
+    if files.contains_key(&near) {
+        return Some(near);
+    }
+    single_suffix_match(files, &[imp.to_string()])
 }
 
 /// The one file that is, or sits below a folder ending in, one of `paths`; none when several match.
@@ -854,6 +865,36 @@ mod tests {
         ]);
         assert!(path(&index, "Main.java", "x/a/Foo.java").is_empty());
         assert!(local_imports(&index, &index.files["Main.java"]).is_empty());
+    }
+
+    #[test]
+    fn c_includes_resolve_near_then_by_unique_path() {
+        let index = index_of(&[
+            (
+                "src/main.c",
+                "#include \"util.h\"\n#include \"net/sock.h\"\n#include <stdio.h>\nint main(void) { return 0; }\n",
+            ),
+            ("src/util.h", "int u(void);\n"),
+            ("include/net/sock.h", "int s(void);\n"),
+        ]);
+        assert_eq!(path(&index, "src/main.c", "src/util.h").len(), 2);
+        assert_eq!(path(&index, "src/main.c", "include/net/sock.h").len(), 2);
+        assert_eq!(local_imports(&index, &index.files["src/main.c"]).len(), 2);
+    }
+
+    #[test]
+    fn c_includes_with_dotdot_work_and_ambiguous_names_make_no_edge() {
+        let index = index_of(&[
+            (
+                "src/a/main.c",
+                "#include \"../x.h\"\n#include \"util.h\"\nint main(void) { return 0; }\n",
+            ),
+            ("src/x.h", "int x(void);\n"),
+            ("one/util.h", "int u(void);\n"),
+            ("two/util.h", "int v(void);\n"),
+        ]);
+        assert_eq!(path(&index, "src/a/main.c", "src/x.h").len(), 2);
+        assert!(path(&index, "src/a/main.c", "one/util.h").is_empty());
     }
 
     #[test]

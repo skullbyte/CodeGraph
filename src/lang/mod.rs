@@ -1,5 +1,6 @@
 //! Language support: one file per language, chosen by file extension.
 
+pub mod c;
 pub mod csharp;
 pub mod generic;
 pub mod golang;
@@ -33,6 +34,9 @@ pub enum Lang {
     Java,
     CSharp,
     Go,
+    C,
+    /// Also `.h`: the C++ grammar reads C too.
+    Cpp,
 }
 
 impl Lang {
@@ -48,6 +52,8 @@ impl Lang {
             "java" => Some(Lang::Java),
             "cs" => Some(Lang::CSharp),
             "go" => Some(Lang::Go),
+            "c" => Some(Lang::C),
+            "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Lang::Cpp),
             "js" | "jsx" | "mjs" | "cjs" => Some(Lang::JavaScript),
             _ => None,
         }
@@ -61,6 +67,8 @@ impl Lang {
             Lang::Java => tree_sitter_java::LANGUAGE.into(),
             Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
+            Lang::C => tree_sitter_c::LANGUAGE.into(),
+            Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Lang::Tsx | Lang::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
@@ -82,6 +90,7 @@ pub fn extract(lang: Lang, src: &str) -> Result<Facts> {
         Lang::Java => java::extract(tree.root_node(), src),
         Lang::CSharp => csharp::extract(tree.root_node(), src),
         Lang::Go => golang::extract(tree.root_node(), src),
+        Lang::C | Lang::Cpp => c::extract(tree.root_node(), src),
     };
     facts.imports.sort();
     facts.imports.dedup();

@@ -347,3 +347,51 @@ fn obsidian_writes_vault_notes() {
         stdout(&out)
     );
 }
+
+#[test]
+fn mixed_language_project_indexes_and_answers_callers() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = [
+        (
+            "app/main.py",
+            "from .util import helper\ndef run():\n    helper()\n",
+        ),
+        ("app/util.py", "def helper():\n    pass\n"),
+        ("Store.java", "class Store { void add() { fmt(); } }\n"),
+        ("Fmt.cs", "class Fmt { void fmt() { } }\n"),
+        (
+            "main.c",
+            "#include \"util.h\"\nint main(void) { return util(); }\n",
+        ),
+        ("util.h", "int util(void);\n"),
+        (
+            "web.js",
+            "const { x } = require('./lib');\nfunction go() { x(); }\n",
+        ),
+        ("lib.js", "function x() {}\n"),
+        (
+            "srv.go",
+            "package s\nfunc Serve() { Handle() }\nfunc Handle() {}\n",
+        ),
+    ];
+    for (path, src) in files {
+        let path = dir.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, src).unwrap();
+    }
+    let out = run(dir.path(), &["index"]);
+    assert!(
+        stdout(&out).starts_with("indexed 9 files"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(
+        stdout(&run(dir.path(), &["callers", "helper"])),
+        "app/main.py:3  in run\n"
+    );
+    assert_eq!(
+        stdout(&run(dir.path(), &["callers", "Handle"])),
+        "srv.go:2  in Serve\n"
+    );
+    assert!(stdout(&run(dir.path(), &["def", "main"])).contains("main.c:2"));
+}
