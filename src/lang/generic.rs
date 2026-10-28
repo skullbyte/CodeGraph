@@ -64,7 +64,7 @@ fn add_item(
         name: name.clone(),
         kind,
         line: line_of(node),
-        signature: sig.trim_end_matches([':', ' ']).to_string(),
+        signature: sig.trim_end_matches([':', ';', ' ']).to_string(),
     });
     (kind == Kind::Fn).then_some(name)
 }

@@ -1,6 +1,7 @@
 //! Language support: one file per language, chosen by file extension.
 
 pub mod generic;
+pub mod java;
 pub mod python;
 pub mod rust;
 pub mod typescript;
@@ -27,6 +28,7 @@ pub enum Lang {
     /// Parsed with the TSX grammar: JavaScript (and JSX) is a subset of it.
     JavaScript,
     Python,
+    Java,
 }
 
 impl Lang {
@@ -39,6 +41,7 @@ impl Lang {
             "ts" => Some(Lang::TypeScript),
             "tsx" => Some(Lang::Tsx),
             "py" => Some(Lang::Python),
+            "java" => Some(Lang::Java),
             "js" | "jsx" | "mjs" | "cjs" => Some(Lang::JavaScript),
             _ => None,
         }
@@ -49,6 +52,7 @@ impl Lang {
             Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
+            Lang::Java => tree_sitter_java::LANGUAGE.into(),
             Lang::Tsx | Lang::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
@@ -67,6 +71,7 @@ pub fn extract(lang: Lang, src: &str) -> Result<Facts> {
             typescript::extract(tree.root_node(), src)
         }
         Lang::Python => python::extract(tree.root_node(), src),
+        Lang::Java => java::extract(tree.root_node(), src),
     };
     facts.imports.sort();
     facts.imports.dedup();

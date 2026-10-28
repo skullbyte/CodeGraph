@@ -214,6 +214,7 @@ fn resolve_import<V>(
     match Lang::from_path(from) {
         Some(Lang::Rust) => resolve_rust_module(files, from, imp),
         Some(Lang::Python) => resolve_python_module(files, from, imp),
+        Some(Lang::Java) => resolve_java_class(files, imp),
         _ => resolve_ts_import(files, aliases, from, imp),
     }
 }
@@ -294,10 +295,22 @@ fn resolve_python_module<V>(files: &BTreeMap<String, V>, from: &str, imp: &str) 
     if let Some(found) = candidates("").into_iter().find(|p| files.contains_key(p)) {
         return Some(found);
     }
-    let suffixes = candidates("").map(|c| format!("/{c}"));
-    let mut hits = files
-        .keys()
-        .filter(|f| suffixes.iter().any(|s| f.ends_with(s.as_str())));
+    single_suffix_match(files, &candidates(""))
+}
+
+/// Java class `a.b.C` -> the file `a/b/C.java`, wherever the source root is (`src/main/java/...`).
+fn resolve_java_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<String> {
+    let path = format!("{}.java", imp.replace('.', "/"));
+    single_suffix_match(files, &[path])
+}
+
+/// The one file that is, or sits below a folder ending in, one of `paths`; none when several match.
+fn single_suffix_match<V>(files: &BTreeMap<String, V>, paths: &[String]) -> Option<String> {
+    let mut hits = files.keys().filter(|f| {
+        paths
+            .iter()
+            .any(|p| f.as_str() == p || f.ends_with(&format!("/{p}")))
+    });
     let first = hits.next()?;
     hits.next().is_none().then(|| first.clone())
 }
@@ -799,6 +812,48 @@ mod tests {
         let entry = &index.files["app/main.py"];
         assert_eq!(local_imports(&index, entry), vec![".util", "pkg.sub"]);
         assert_eq!(path(&index, "app/main.py", "pkg/sub.py").len(), 2);
+    }
+
+    #[test]
+    fn java_imports_resolve_under_any_source_root() {
+        let index = index_of(&[
+            (
+                "src/main/java/app/Store.java",
+                "package app;\nimport com.shop.Cart;\nimport static com.shop.Util.fmt;\nimport java.util.List;\nclass Store {}\n",
+            ),
+            (
+                "src/main/java/com/shop/Cart.java",
+                "package com.shop;\nclass Cart {}\n",
+            ),
+            (
+                "src/main/java/com/shop/Util.java",
+                "package com.shop;\nclass Util {}\n",
+            ),
+        ]);
+        let from = "src/main/java/app/Store.java";
+        assert_eq!(
+            path(&index, from, "src/main/java/com/shop/Cart.java").len(),
+            2
+        );
+        assert_eq!(
+            path(&index, from, "src/main/java/com/shop/Util.java").len(),
+            2
+        );
+        assert_eq!(local_imports(&index, &index.files[from]).len(), 2);
+    }
+
+    #[test]
+    fn java_ambiguous_and_missing_classes_make_no_edge() {
+        let index = index_of(&[
+            ("x/a/Foo.java", "class Foo {}\n"),
+            ("y/a/Foo.java", "class Foo {}\n"),
+            (
+                "Main.java",
+                "import a.Foo;\nimport java.util.List;\nimport a.*;\nclass Main {}\n",
+            ),
+        ]);
+        assert!(path(&index, "Main.java", "x/a/Foo.java").is_empty());
+        assert!(local_imports(&index, &index.files["Main.java"]).is_empty());
     }
 
     #[test]
