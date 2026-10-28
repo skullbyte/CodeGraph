@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use codegraph::model::Index;
 use codegraph::query::{Affected, CallerHit, DefHit, Hop, Hub};
-use codegraph::{benchmark, codemap, community, index, query, report, watch};
+use codegraph::{benchmark, codemap, community, html, index, query, report, watch};
 
 /// Fast offline code graph: where is X, who calls X, how does A reach B.
 #[derive(Parser)]
@@ -61,6 +61,8 @@ enum Command {
     },
     /// Write .claude/GRAPH_REPORT.md: key modules, hubs, surprising links, communities.
     Report,
+    /// Write .claude/graph.html: one offline page with an interactive map of the files.
+    Html,
     /// Compare codegraph with Graphify (if installed): index time and `explain` answers.
     Benchmark {
         /// Symbol to compare on (repeatable); defaults to the 5 top hubs.
@@ -129,6 +131,7 @@ fn run(cli: Cli) -> Result<()> {
             print_results(&query::hubs(&load(&cli.dir)?, *top), cli.json, Hub::text)
         }
         Command::Report => cmd_report(&cli.dir, cli.json),
+        Command::Html => cmd_html(&cli.dir),
         Command::Benchmark { names } => cmd_benchmark(&cli.dir, names, cli.json),
         Command::Watch { root, interval_ms } => {
             let root = root.as_ref().unwrap_or(&cli.dir);
@@ -325,6 +328,15 @@ fn cmd_report(root: &Path, json: bool) -> Result<()> {
         "communities"
     };
     println!("wrote .claude/GRAPH_REPORT.md ({count} {noun})");
+    Ok(())
+}
+
+fn cmd_html(root: &Path) -> Result<()> {
+    let idx = load(root)?;
+    let (page, files) = html::render(&project_name(root)?, &idx);
+    let path = root.join(".claude").join("graph.html");
+    index::write_atomic(&path, page.as_bytes())?;
+    println!("wrote .claude/graph.html ({files} files)");
     Ok(())
 }
 

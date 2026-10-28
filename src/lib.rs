@@ -3,6 +3,7 @@
 pub mod benchmark;
 pub mod codemap;
 pub mod community;
+pub mod html;
 pub mod index;
 pub mod lang;
 pub mod model;

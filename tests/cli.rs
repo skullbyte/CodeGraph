@@ -259,6 +259,27 @@ fn report_writes_graph_report_and_json_lists_communities() {
 }
 
 #[test]
+fn html_writes_a_self_contained_page() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let out = run(dir.path(), &["html"]);
+    assert!(out.status.success());
+    assert_eq!(stdout(&out).trim(), "wrote .claude/graph.html (2 files)");
+    let page = fs::read_to_string(dir.path().join(".claude/graph.html")).unwrap();
+    assert!(page.contains("const DATA = {"));
+    assert!(page.contains(r#""path":"src/lib.rs""#));
+    assert!(!page.contains("http://") && !page.contains("https://"));
+}
+
+#[test]
+fn html_without_index_fails_with_hint() {
+    let dir = project();
+    let out = run(dir.path(), &["html"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("codegraph index"));
+}
+
+#[test]
 fn report_without_index_fails_with_hint() {
     let dir = project();
     let out = run(dir.path(), &["report"]);
