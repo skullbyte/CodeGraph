@@ -477,3 +477,157 @@ fn closed_stdout_ends_quietly() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn serve_speaks_mcp_over_stdin_and_stdout() {
+    use std::io::Write;
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codegraph"))
+        .args(["serve", "--dir"])
+        .arg(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"callers","arguments":{"name":"alpha"}}}"#,
+    ];
+    let mut stdin = child.stdin.take().unwrap();
+    for request in requests {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    drop(stdin); // the client hangs up: the server ends by itself
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let replies: Vec<serde_json::Value> = stdout(&out)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 3, "the notification gets no reply");
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "codegraph");
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(
+        replies[2]["result"]["content"][0]["text"],
+        "src/lib.rs:3  in pub fn beta"
+    );
+}
+
+#[test]
+fn hook_prints_one_json_line_then_stays_within_budget() {
+    use std::io::Write;
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let state = tempfile::tempdir().unwrap();
+    let hook = |input: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_codegraph"))
+            .args(["hook", "search"])
+            .env("CLAUDE_PROJECT_DIR", dir.path())
+            .env("XDG_RUNTIME_DIR", state.path())
+            .env("CODEGRAPH_HOOK_NUDGES", "2")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "a hook never fails");
+        assert!(out.stderr.is_empty());
+        stdout(&out)
+    };
+    let grep = r#"{"session_id":"abc","tool_name":"Grep","tool_input":{"pattern":"alpha"}}"#;
+    let first = hook(grep);
+    let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert!(hook(grep).starts_with('{'));
+    assert_eq!(hook(grep), "", "budget of 2 used up");
+    assert_eq!(hook("garbage"), "");
+    assert_eq!(
+        hook(r#"{"session_id":"x","tool_input":{"command":"cargo build"}}"#),
+        ""
+    );
+}
+
+#[test]
+fn install_and_uninstall_wire_one_project() {
+    let dir = project();
+    let shown = stdout(&run(dir.path(), &["install", "--print"]));
+    assert!(shown.contains("codegraph hook search") && shown.contains("\"serve\""));
+    assert!(!dir.path().join(".mcp.json").exists());
+
+    let out = run(dir.path(), &["install"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mcp = fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+    assert!(mcp.contains("\"codegraph\"") && mcp.contains("\"serve\""));
+    let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+    assert!(settings.contains("codegraph hook read"));
+    assert!(
+        dir.path()
+            .join(".claude/skills/codegraph/SKILL.md")
+            .is_file()
+    );
+
+    assert!(run(dir.path(), &["uninstall"]).status.success());
+    let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+    assert!(!settings.contains("codegraph hook"));
+    assert!(
+        !dir.path()
+            .join(".claude/skills/codegraph/SKILL.md")
+            .exists()
+    );
+}
+
+#[test]
+fn hook_ignores_an_empty_project_dir_variable() {
+    use std::io::Write;
+    let project = project();
+    run(project.path(), &["index"]);
+    let elsewhere = tempfile::tempdir().unwrap(); // no index here: only --dir points at the project
+    let state = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codegraph"))
+        .args(["hook", "search", "--dir"])
+        .arg(project.path())
+        .current_dir(elsewhere.path())
+        .env("CLAUDE_PROJECT_DIR", "")
+        .env("XDG_RUNTIME_DIR", state.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let grep = r#"{"session_id":"e","tool_input":{"pattern":"alpha"}}"#;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(grep.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        stdout(&out).contains("PreToolUse"),
+        "fell back to --dir: {}",
+        stdout(&out)
+    );
+}

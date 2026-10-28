@@ -14,7 +14,8 @@ use serde::Serialize;
 use codegraph::model::Index;
 use codegraph::query::{Affected, CallerHit, DefHit, Hop, Hub};
 use codegraph::{
-    benchmark, codemap, community, html, index, mermaid, obsidian, query, report, scip, watch,
+    benchmark, codemap, community, hook, html, index, install, mermaid, obsidian, query, report,
+    scip, serve, watch,
 };
 
 /// Fast offline code graph: where is X, who calls X, how does A reach B.
@@ -84,6 +85,22 @@ enum Command {
         /// The index file (defaults to index.scip in the project root).
         file: Option<PathBuf>,
     },
+    /// Wire Claude Code to the graph for this project: search/read hooks, the MCP server, a skill.
+    Install {
+        /// Show what would be written, change nothing.
+        #[arg(long)]
+        print: bool,
+    },
+    /// Remove what `install` added (only our own entries).
+    Uninstall,
+    /// Claude Code PreToolUse hook (reads the tool call on stdin); prints nothing when no nudge is due.
+    Hook {
+        /// `search` for Bash/Grep calls, `read` for Read/Glob calls.
+        #[arg(value_parser = ["search", "read"])]
+        kind: String,
+    },
+    /// Serve the queries to Claude Code as MCP tools over stdin/stdout.
+    Serve,
     /// Compare codegraph with Graphify (if installed): index time and `explain` answers.
     Benchmark {
         /// Symbol to compare on (repeatable); defaults to the 5 top hubs.
@@ -182,6 +199,23 @@ fn run(cli: Cli) -> Result<()> {
             );
             Ok(())
         }
+        Command::Install { print } => {
+            install::install(&cli.dir, *print)?
+                .iter()
+                .for_each(|line| println!("{line}"));
+            Ok(())
+        }
+        Command::Uninstall => {
+            install::uninstall(&cli.dir)?
+                .iter()
+                .for_each(|line| println!("{line}"));
+            Ok(())
+        }
+        Command::Hook { kind } => {
+            cmd_hook(&cli.dir, kind);
+            Ok(())
+        }
+        Command::Serve => serve::run(&cli.dir),
         Command::Scip { file } => cmd_scip(&cli.dir, file.as_deref(), cli.json),
         Command::Obsidian { out } => {
             let out = out
@@ -397,6 +431,35 @@ fn cmd_html(root: &Path) -> Result<()> {
     index::write_atomic(&path, page.as_bytes())?;
     println!("wrote .claude/graph.html ({files} files)");
     Ok(())
+}
+
+/// Never fails and never blocks the tool call: any problem just prints nothing.
+fn cmd_hook(dir: &Path, kind: &str) {
+    use std::io::Read;
+    let mut input = String::new();
+    if io::stdin()
+        .take(1 << 20)
+        .read_to_string(&mut input)
+        .is_err()
+    {
+        return;
+    }
+    let project = std::env::var_os("CLAUDE_PROJECT_DIR")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| dir.to_path_buf(), PathBuf::from);
+    // Read tool calls carry absolute paths, so compare against an absolute project path.
+    let project = std::path::absolute(&project).unwrap_or(project);
+    let budget = std::env::var("CODEGRAPH_HOOK_NUDGES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(hook::DEFAULT_BUDGET);
+    let Some(state) = hook::state_dir() else {
+        return;
+    };
+    if let Some(line) = hook::nudge(kind, &input, &project, &state, budget) {
+        // A closed stdout is not worth a panic.
+        let _ = io::stdout().write_all(line.as_bytes());
+    }
 }
 
 fn cmd_scip(root: &Path, file: Option<&Path>, json: bool) -> Result<()> {

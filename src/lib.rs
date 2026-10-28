@@ -3,8 +3,10 @@
 pub mod benchmark;
 pub mod codemap;
 pub mod community;
+pub mod hook;
 pub mod html;
 pub mod index;
+pub mod install;
 pub mod lang;
 pub mod mermaid;
 pub mod model;
@@ -12,5 +14,6 @@ pub mod obsidian;
 pub mod query;
 pub mod report;
 pub mod scip;
+pub mod serve;
 pub mod walk;
 pub mod watch;

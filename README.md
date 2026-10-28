@@ -24,6 +24,26 @@ codegraph watch [dir]        # index, then keep the index fresh as files change 
 ```
 Add `--json` for JSON output and `--dir <root>` to point at another project.
 
+## Use it from Claude Code (fewer tokens)
+Claude only saves tokens if it asks the graph instead of grepping and reading files. One project at a time:
+
+    cargo build --release && install -Dm755 target/release/codegraph ~/.local/bin/codegraph   # once; any dir on your PATH
+    codegraph install            # in the project: hooks, MCP server, skill (--print shows them first)
+    codegraph uninstall          # removes only what install added
+
+`install` edits `.claude/settings.json` (keys end up sorted; your other settings and hooks stay), `.mcp.json`
+and `.claude/skills/codegraph/SKILL.md`; it never touches `~/.claude` and refuses a settings file that is not
+valid JSON. Restart Claude Code and approve the `codegraph` server when asked.
+
+- **MCP server** (`codegraph serve`, offline, no network): tools `def`, `callers`, `explain`, `path`, `affected`,
+  `hubs`, `community`, `stats`. All eight descriptions together cost about 600 tokens per session; answers
+  are the CLI lines, cut at 40 lines (`limit`) with `... +N more`. It reloads when the graph changes and builds
+  an index by itself if there is none.
+- **Hook** (`codegraph hook search|read`): when Claude is about to grep, or read a source file, in an indexed
+  project it adds one sentence saying the tools exist. At most 3 times per agent per session
+  (`CODEGRAPH_HOOK_NUDGES=0` turns it off) and it never blocks a tool call.
+- `install` also swaps an old `codemap.sh` session-start line for `codegraph index`.
+
 ## Exact calls with SCIP (optional)
 By default `callers` matches calls by name. A SCIP index, written by the language's own compiler
 tooling, says which function each call really goes to, so calls into the standard library

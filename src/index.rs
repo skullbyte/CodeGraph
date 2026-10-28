@@ -34,6 +34,11 @@ fn cache_path(root: &Path) -> PathBuf {
     root.join(".claude").join("graph.bin")
 }
 
+/// Is there a graph cache for this project? (Cheaper than loading it.)
+pub fn cache_exists(root: &Path) -> bool {
+    cache_path(root).is_file()
+}
+
 /// Load the cached graph; `None` if missing, unreadable, from another `VERSION`, or built by a
 /// different binary (so a changed extractor never reuses stale results).
 pub fn load(root: &Path) -> Option<Index> {
