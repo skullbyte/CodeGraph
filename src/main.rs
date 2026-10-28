@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use codegraph::model::Index;
 use codegraph::query::{Affected, CallerHit, DefHit, Hop, Hub};
-use codegraph::{benchmark, codemap, community, html, index, query, report, watch};
+use codegraph::{benchmark, codemap, community, html, index, mermaid, query, report, watch};
 
 /// Fast offline code graph: where is X, who calls X, how does A reach B.
 #[derive(Parser)]
@@ -63,6 +63,13 @@ enum Command {
     Report,
     /// Write .claude/graph.html: one offline page with an interactive map of the files.
     Html,
+    /// Print a Mermaid flowchart of what <name> calls (GitHub and Obsidian draw it).
+    Mermaid {
+        name: String,
+        /// How many call hops to follow.
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
+        depth: u64,
+    },
     /// Compare codegraph with Graphify (if installed): index time and `explain` answers.
     Benchmark {
         /// Symbol to compare on (repeatable); defaults to the 5 top hubs.
@@ -132,6 +139,18 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Report => cmd_report(&cli.dir, cli.json),
         Command::Html => cmd_html(&cli.dir),
+        Command::Mermaid { name, depth } => {
+            let chart = mermaid::callflow(&load(&cli.dir)?, name, *depth as usize);
+            print!(
+                "{}",
+                if chart.is_empty() {
+                    "no calls\n"
+                } else {
+                    &chart
+                }
+            );
+            Ok(())
+        }
         Command::Benchmark { names } => cmd_benchmark(&cli.dir, names, cli.json),
         Command::Watch { root, interval_ms } => {
             let root = root.as_ref().unwrap_or(&cli.dir);

@@ -1,22 +1,16 @@
 # codegraph progress
 
 ## Now
-Goal: Part A phase 3 (Visuals): `codegraph html` done (offline 3D space view, reviewed); next `mermaid`, then `obsidian`.
-State: Phase 1 is DONE and committed (8674776, 652302a). Phase 2 is DONE, reviewed and committed (src/community.rs, report.rs, benchmark.rs; CLI `report`, `benchmark`). `just check` green: 76 unit + 13 end-to-end tests.
-Next step: commit the html work (add files by name, never `git add -A`), then step 2 `codegraph mermaid` and step 3 `codegraph obsidian` per the approved plan (~/.claude/plans/floating-munching-lantern.md).
+Goal: Part A phase 3 (Visuals): `codegraph html` is DONE and committed; next `mermaid`, then `obsidian`.
+State: Phases 1-2 done. html = 3 commits (d10f627 first page, c4de95b offline 3D space view, 50d60cf accessibility/keyboard fixes); review loop ended with "no remaining issues"; tested in Brave. `just check` green: 88 unit + 15 end-to-end tests; tree clean. `origin` = github.com/skullbyte/GraphGraph (fresh repo, the user pushes). History was rewritten on 2026-10-29 (identity), so all commit hashes changed.
+Next step: mermaid done and committed; now step 3 `obsidian` (test first), per ~/.claude/plans/floating-munching-lantern.md; tick the Graphify checklist and refresh it as features land.
 
 ## Checklist
-- [x] Phase 1 (Part A.1) core engine, reviewed and committed
-  - [x] Rust + TS/TSX extraction: symbols, imports, calls with enclosing fn (incl. macro args, cfg_*! bodies)
-  - [x] walker (.gitignore, skip node_modules/target/Library/build/dist), parallel + incremental index
-  - [x] outputs: .claude/codemap.md (codemap.sh format), graph.json, graph.bin (cache)
-  - [x] commands: index, update, watch, def, callers, explain, path, affected, hubs; `--json`, `--dir`
-  - [x] tsconfig `paths` aliases, project lock, atomic writes, binary cache, README (credits Graphify), Apache-2.0 LICENSE
-  - [x] benchmarks on tokio + pizzeria (see Gotchas for numbers)
+- [x] Phase 1 (A.1) core engine: Rust + TS/TSX extraction, walker, parallel incremental index, codemap/graph.json/graph.bin, index/update/watch/def/callers/explain/path/affected/hubs, tsconfig aliases, benchmarks (done 2026-10-27)
 - [x] Phase 2 (A.2) Analysis: file-level Louvain communities, `codegraph report` -> .claude/GRAPH_REPORT.md, `codegraph benchmark` vs Graphify (reviewed, committed)
 - [ ] Phase 3 (A.3) Visuals
-  - [x] `codegraph html` (offline page; 2D committed eb91796; space-themed 3D view with Graphify web features done and reviewed, not committed yet)
-  - [ ] Mermaid callflow export
+  - [x] `codegraph html`: offline 3D space view + Graphify web features, reviewed, committed (d10f627, c4de95b, 50d60cf)
+  - [x] Mermaid callflow export: `codegraph mermaid <name> [--depth 2]` (src/mermaid.rs, reviewed, committed)
   - [ ] Obsidian vault export
 - [ ] Phase 4 (A.4) More languages: Python, Java, C#, Go, JavaScript, C/C++
 - [ ] Phase 5 (A.5) Precision: SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
@@ -29,7 +23,7 @@ Next step: commit the html work (add files by name, never `git add -A`), then st
 Compared on 2026-10-28 against Graphify 0.9.97 (source: see CLAUDE.md). `G/` = graphify package dir. Mark: [x] done, [~] partial, [ ] todo. Update when a feature lands.
 
 Web view (`G/exporters/html.py`; Graphify's is 2D vis-network 9.1.6 from a CDN, NOT 3D, NOT offline):
-- [x] interactive graph page: ours = offline plain-canvas page with own 3D force layout (`src/html.rs`, `src/html/template.html`); Graphify uses vis-network from a CDN
+- [x] interactive graph page: ours = offline plain-canvas page with own 3D force layout (`src/html.rs` + parts in `src/html/`); Graphify uses vis-network from a CDN
 - [x] search box, click-to-inspect side panel with neighbours
 - [x] community colouring; [x] community legend with per-community checkboxes + All/None
 - [x] node size by degree; [x] labels only on hubs (degree >= 30% of max, Graphify 15%; also selected and search hits)
@@ -43,7 +37,7 @@ Web view (`G/exporters/html.py`; Graphify's is 2D vis-network 9.1.6 from a CDN, 
 Exports (`G/export.py`, `G/exporters/`):
 - [x] graph.json (ours also graph.bin)
 - [x] GRAPH_REPORT.md (`report.py`)
-- [ ] callflow-html (`callflow_html.py`: Mermaid page with pan/zoom; Mermaid from a CDN) -> ours: `codegraph mermaid`, Phase 3 step 2
+- [~] callflow-html (`callflow_html.py`: Mermaid page with pan/zoom; Mermaid from a CDN) -> ours: `codegraph mermaid` prints plain Mermaid text (callees only, depth, 60-edge cap), no page
 - [ ] obsidian vault + canvas (`to_obsidian`, `to_canvas`) -> Phase 3 step 3
 - [ ] tree (`tree_html.py`, D3 collapsible tree), wiki, svg, graphml, neo4j, falkordb -> Part B
 
@@ -69,7 +63,11 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
 - 2026-10-28 the page source is split into `src/html/style.css`, `src/html/js/01..10-*.js` and a skeleton `template.html`, joined by `assemble()` in `src/html.rs`; output proved byte-identical to the single file. Reason: agents re-read the whole 1700-line file every step (~200k tokens per pass). User rule: one `code-reviewer` run per finished feature
 - 2026-10-28 page design: done by agents on Sonnet (user rule: no Opus), using the pizzeria skills (frontend-design, apple-design, animate, visual-qa) plus ui-ux-pro-max, taste-skill and impeccable (installed without hook, telemetry off, gitignored). The page must stay offline, single-file, image-free; the template line `const DATA = /*DATA*/;` and `{{TITLE}}` are fixed by Rust tests; the SVG namespace is built from two strings to keep the no-`http://` test
 - 2026-10-28 Graphify's web view is 2D (vis-network via CDN), so "port the 3D web" was a wrong assumption; ours stays offline. User chose: match Graphify's web features, plus our own offline 3D (plain canvas, no libraries)
-- 2026-10-28 user rule: test pages in Brave (Flatpak com.brave.Browser); my browser tools only drive Chrome, so verify there and say so
+- 2026-10-28 user rule: test pages in Brave. My browser tools ARE connected to Brave (`await navigator.brave.isBrave()` is true), so test there directly (earlier note saying they drive Chrome was wrong)
+- 2026-10-29 git identity is `skullbyte <278924712+skullbyte@users.noreply.github.com>` (global + this repo); history of codegraph and 4 other solo repos rewritten (author/committer only): the user hides the Proton email, their name is fine
+- 2026-10-29 `origin` is github.com/skullbyte/GraphGraph; never push/force-push unless asked (the user pushed themselves); `DI-UD1-GRUPO3` (classmate's commits) left alone on purpose
+- 2026-10-29 skipped as not worth tokens/overlap: Anthropic security-guidance (runs an Opus review every turn), frontend-design, Addy Osmani agent-skills, Superpowers, Headroom, Archify, REA. Use the `security-review` skill on demand before publishing
+- 2026-10-29 page reviews: loop `code-reviewer` (Sonnet) and fix every real defect, even small, until it says "no remaining issues"
 - 2026-10-27 walk the tree-sitter syntax tree by hand, no query API: queries need the extra `streaming-iterator` crate
 - 2026-10-27 `calls` are matched by name only (no types): exact resolution is Phase 5 (SCIP), so don't re-litigate it earlier
 - 2026-10-27 re-parse the body of `cfg_*!` macros as Rust and token-scan other macro arguments: tokio hides items and calls in macros
@@ -88,6 +86,10 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
 - 2026-10-27 `benchmark` shells out to `graphify extract` (temp dir, removed after) and times both tools as processes; needs an existing index
 
 ## Gotchas
+- Page work: edit only the part files in `src/html/` (js/01..10, style.css, template.html); `rg -c 'https?://|innerHTML|<img|url\(' src/html/` must print nothing; Rust tests fix `const DATA = /*DATA*/;` and `{{TITLE}}`
+- Brave tests: serve `bench/pizzeria/.claude` with `exec python3 -m http.server <port> --bind 127.0.0.1` as a background task; stop it by PID from `ss -ltnp` (`pkill -f` kills the shell, exit 144). Regenerate with `cargo build --release && ./target/release/codegraph index --dir bench/pizzeria && ./target/release/codegraph html --dir bench/pizzeria`
+- Impeccable files (`.claude/skills/impeccable/`, `.claude/agents/impeccable-*.md`, `.impeccable/`) are gitignored: commit by file name, never `git add -A`
+- Agent cost: a design pass ~160-215k tokens, a review 20-85k: keep jobs narrow; `fd` skips hidden dirs (use `-H`)
 - bench/ (git-ignored) holds tokio and a copy of pizzeria-emiliano; `rm -rf` is denied in settings, delete files one by one if needed
 - Bench numbers (release): tokio 814 files cold index ~55-70 ms, cached ~25 ms, update 1 file ~20 ms; notify_waiters 33 callers; def TcpListener -> tokio/src/net/tcp/listener.rs:57; pizzeria formatPrice 12 sites in 6 files
 - Every `cargo build` changes the executable fingerprint, so the next `index` is a full re-parse
@@ -99,7 +101,6 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
 - Phase 2 numbers (release): report tokio 53 ms (91 communities, biggest 179 files, name-match noise like `new_v4` links; Phase 5 fixes), pizzeria 2 ms (14 communities); benchmark: index tokio codegraph 44 ms vs graphify 4391 ms, pizzeria 3 vs 557 ms; explain formatPrice 144 tok/1 ms vs 313 tok/96 ms
 - `resolve_rust_module` fallback was O(imports x files) with string allocs per file; hoisted them (119 ms -> 13 ms on tokio)
 - To check later (open issues from the Phase 2 review, none block Phase 3):
-  - CLAUDE.md gained "No Co-Authored-By or other AI attribution" and was swept into the Phase 2 commit (652302a) by `git add -A`; confirm that was intended
   - unchecked `[]` lookups (`pos[..]`, `community_of[..]`, `index.files[..]`) in src/report.rs and src/community.rs: safe today, switch to `.get()` if the invariants change
   - untested: `benchmark` with Graphify installed, `benchmark --json`, multi-level Louvain with weighted edges
   - `benchmark` explain answers read the saved index, which can be older than the cold build it times

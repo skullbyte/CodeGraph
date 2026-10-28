@@ -307,3 +307,18 @@ fn benchmark_without_graphify_reports_codegraph_only() {
     assert!(lines[3].ends_with(" ms ok"), "{text}");
     assert!(!dir.path().join("graphify-out").exists());
 }
+
+#[test]
+fn mermaid_prints_flowchart_or_no_calls() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let chart = stdout(&run(dir.path(), &["mermaid", "beta"]));
+    assert_eq!(
+        chart,
+        "flowchart LR\n    n0[\"beta\"]\n    n1[\"alpha\"]\n    n0 --> n1\n"
+    );
+    assert_eq!(
+        stdout(&run(dir.path(), &["mermaid", "alpha"])),
+        "no calls\n"
+    );
+}

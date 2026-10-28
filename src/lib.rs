@@ -6,6 +6,7 @@ pub mod community;
 pub mod html;
 pub mod index;
 pub mod lang;
+pub mod mermaid;
 pub mod model;
 pub mod query;
 pub mod report;

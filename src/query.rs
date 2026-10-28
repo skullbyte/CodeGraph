@@ -150,7 +150,7 @@ fn bfs(edges: &Edges, from: &str, to: &str) -> Vec<String> {
 }
 
 /// Function name -> names it calls. A caller like `pub async fn foo<T>` becomes `foo`.
-fn call_edges(index: &Index) -> Edges {
+pub(crate) fn call_edges(index: &Index) -> Edges {
     let mut edges = Edges::new();
     for call in index.files.values().flat_map(|f| &f.calls) {
         if let Some(caller) = call.caller.as_deref() {
