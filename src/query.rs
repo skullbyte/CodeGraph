@@ -215,7 +215,7 @@ fn resolve_import<V>(
         Some(Lang::Rust) => resolve_rust_module(files, from, imp),
         Some(Lang::Python) => resolve_python_module(files, from, imp),
         Some(Lang::Java) => resolve_java_class(files, imp),
-        Some(Lang::C | Lang::Cpp) => resolve_include(files, from, imp),
+        Some(Lang::C | Lang::Cpp | Lang::Header) => resolve_include(files, from, imp),
         _ => resolve_ts_import(files, aliases, from, imp),
     }
 }

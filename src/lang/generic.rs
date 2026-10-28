@@ -12,8 +12,11 @@ pub struct Config {
     pub items: &'static [(&'static str, Kind)],
     /// Node kinds that call something.
     pub calls: &'static [&'static str],
-    /// Name of a declaration (default for most grammars: its `name` field).
-    pub name: fn(Node, &str) -> Option<String>,
+    /// Node kinds that name the caller of the calls inside them but are not listed as symbols
+    /// (a C# property: its accessors' calls belong to it).
+    pub scopes: &'static [&'static str],
+    /// Names a declaration introduces (most grammars: just its `name` field; `typedef A, *B;` gives two).
+    pub name: fn(Node, &str) -> Vec<String>,
     /// Name of what a call node calls.
     pub callee: fn(Node, &str) -> Option<String>,
     /// Called on every node; pushes the module paths an import node names.
@@ -32,6 +35,8 @@ fn visit(node: Node, src: &str, config: &Config, facts: &mut Facts, enclosing: O
     let kind = node.kind();
     if let Some(&(_, item)) = config.items.iter().find(|(k, _)| *k == kind) {
         own = add_item(node, item, src, config, facts);
+    } else if config.scopes.contains(&kind) {
+        own = (config.name)(node, src).into_iter().next();
     }
     if config.calls.contains(&kind)
         && let Some(callee) = (config.callee)(node, src)
@@ -58,20 +63,25 @@ fn add_item(
     config: &Config,
     facts: &mut Facts,
 ) -> Option<String> {
-    let name = (config.name)(node, src)?;
+    let names = (config.name)(node, src);
     let sig = signature(node, node.child_by_field_name("body"), src);
-    facts.symbols.push(Symbol {
-        name: name.clone(),
-        kind,
-        line: line_of(node),
-        signature: sig.trim_end_matches([':', ';', ' ']).to_string(),
-    });
-    (kind == Kind::Fn).then_some(name)
+    for name in &names {
+        facts.symbols.push(Symbol {
+            name: name.clone(),
+            kind,
+            line: line_of(node),
+            signature: sig.trim_end_matches([':', ';', ' ']).to_string(),
+        });
+    }
+    names.into_iter().next().filter(|_| kind == Kind::Fn)
 }
 
 /// The `name` field of a node: right for most grammars.
-pub fn name_field(node: Node, src: &str) -> Option<String> {
-    field_text(node, "name", src).map(String::from)
+pub fn name_field(node: Node, src: &str) -> Vec<String> {
+    field_text(node, "name", src)
+        .map(String::from)
+        .into_iter()
+        .collect()
 }
 
 /// Text of a node, or None when it is empty.

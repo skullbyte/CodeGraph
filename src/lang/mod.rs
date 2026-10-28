@@ -35,8 +35,9 @@ pub enum Lang {
     CSharp,
     Go,
     C,
-    /// Also `.h`: the C++ grammar reads C too.
     Cpp,
+    /// `.h`: tried as C first (K&R functions, C++ keywords as names), as C++ when that fails.
+    Header,
 }
 
 impl Lang {
@@ -53,7 +54,8 @@ impl Lang {
             "cs" => Some(Lang::CSharp),
             "go" => Some(Lang::Go),
             "c" => Some(Lang::C),
-            "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Lang::Cpp),
+            "h" => Some(Lang::Header),
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Lang::Cpp),
             "js" | "jsx" | "mjs" | "cjs" => Some(Lang::JavaScript),
             _ => None,
         }
@@ -67,7 +69,7 @@ impl Lang {
             Lang::Java => tree_sitter_java::LANGUAGE.into(),
             Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
-            Lang::C => tree_sitter_c::LANGUAGE.into(),
+            Lang::C | Lang::Header => tree_sitter_c::LANGUAGE.into(),
             Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Lang::Tsx | Lang::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
@@ -78,9 +80,18 @@ impl Lang {
 pub fn extract(lang: Lang, src: &str) -> Result<Facts> {
     let mut parser = Parser::new();
     parser.set_language(&lang.grammar())?;
-    let tree = parser
+    let mut tree = parser
         .parse(src, None)
         .ok_or_else(|| anyhow!("parser gave no tree"))?;
+    if lang == Lang::Header && tree.root_node().has_error() {
+        parser.set_language(&Lang::Cpp.grammar())?;
+        if let Some(cpp) = parser
+            .parse(src, None)
+            .filter(|t| !t.root_node().has_error())
+        {
+            tree = cpp;
+        }
+    }
     let mut facts = match lang {
         Lang::Rust => rust::extract(tree.root_node(), src),
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
@@ -90,7 +101,7 @@ pub fn extract(lang: Lang, src: &str) -> Result<Facts> {
         Lang::Java => java::extract(tree.root_node(), src),
         Lang::CSharp => csharp::extract(tree.root_node(), src),
         Lang::Go => golang::extract(tree.root_node(), src),
-        Lang::C | Lang::Cpp => c::extract(tree.root_node(), src),
+        Lang::C | Lang::Cpp | Lang::Header => c::extract(tree.root_node(), src),
     };
     facts.imports.sort();
     facts.imports.dedup();

@@ -12,6 +12,7 @@ const CONFIG: Config = Config {
         ("class_definition", Kind::Class),
     ],
     calls: &["call"],
+    scopes: &[],
     name: name_field,
     callee,
     imports,

@@ -15,6 +15,7 @@ const CONFIG: Config = Config {
         ("type_alias", Kind::Type),
     ],
     calls: &["call_expression", "type_conversion_expression"],
+    scopes: &[],
     name: name_field,
     callee,
     imports: |_, _, _| {},

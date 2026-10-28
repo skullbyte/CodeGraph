@@ -17,6 +17,7 @@ const CONFIG: Config = Config {
         ("constructor_declaration", Kind::Fn),
     ],
     calls: &["method_invocation", "object_creation_expression"],
+    scopes: &[],
     name: name_field,
     callee,
     imports,

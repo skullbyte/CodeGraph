@@ -1,9 +1,9 @@
 //! C and C++ extraction: functions, types, `#include "x.h"` and calls. The C++ grammar reads
-//! plain C too, so one table serves both; `.h` files use the C++ grammar for that reason.
+//! plain C too, so one table serves both. `.h` files are tried as C first, then as C++.
 
 use tree_sitter::Node;
 
-use super::generic::{Config, non_empty};
+use super::generic::{Config, name_field, non_empty};
 use super::{Facts, field_text, text};
 use crate::model::Kind;
 
@@ -17,6 +17,7 @@ const CONFIG: Config = Config {
         ("type_definition", Kind::Type),
     ],
     calls: &["call_expression"],
+    scopes: &[],
     name,
     callee,
     imports,
@@ -27,18 +28,23 @@ pub fn extract(root: Node, src: &str) -> Facts {
 }
 
 /// A function's name sits inside its declarator (`char *f(int)` -> pointer -> function -> `f`);
-/// `A::f` -> f. A type counts only where it is defined (has a body), not where it is used.
-fn name(node: Node, src: &str) -> Option<String> {
+/// `A::f` -> f. A typedef gives every name it declares. A type counts only where it is defined
+/// (has a body), not where it is used.
+fn name(node: Node, src: &str) -> Vec<String> {
     match node.kind() {
-        "function_definition" => declarator_name(node.child_by_field_name("declarator")?, src),
+        "function_definition" => node
+            .child_by_field_name("declarator")
+            .and_then(|d| declarator_name(d, src))
+            .into_iter()
+            .collect(),
         "type_definition" => {
-            let d = node.child_by_field_name("declarator")?;
-            (d.kind() == "type_identifier").then(|| non_empty(d, src))?
+            let mut cursor = node.walk();
+            node.children_by_field_name("declarator", &mut cursor)
+                .filter_map(|d| declarator_name(d, src))
+                .collect()
         }
-        _ => {
-            node.child_by_field_name("body")?;
-            field_text(node, "name", src).map(String::from)
-        }
+        _ if node.child_by_field_name("body").is_none() => Vec::new(),
+        _ => name_field(node, src),
     }
 }
 
@@ -53,6 +59,7 @@ fn declarator_name(mut node: Node, src: &str) -> Option<String> {
     if !matches!(
         node.kind(),
         "identifier"
+            | "type_identifier"
             | "field_identifier"
             | "operator_name"
             | "destructor_name"
@@ -164,8 +171,28 @@ struct Node *head;
         let names: Vec<_> = facts.symbols.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["twice", "c_api", "S", "~S", "operator==", "getf"]
+            vec!["twice", "c_api", "S", "~S", "operator==", "getf", "FooPtr"]
         );
+    }
+
+    #[test]
+    fn typedefs_record_every_name_and_old_style_c_headers_parse() {
+        let facts = extract_file(
+            Lang::Header,
+            "typedef struct { int a; } A, *B;\ntypedef int (*cb)(int);\nint old(a) int a; { return a; }\nint new = 1;\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["A", "B", "cb", "old"]);
+        let cpp = extract_file(Lang::Header, "class Store { void add() {} };\n").unwrap();
+        assert_eq!(cpp.symbols[0].name, "Store");
+    }
+
+    #[test]
+    fn header_broken_in_both_grammars_keeps_the_c_symbols() {
+        let facts =
+            extract_file(Lang::Header, "int ok(void) { return 0; }\n@@@ ((( }}}\n").unwrap();
+        assert!(facts.symbols.iter().any(|s| s.name == "ok"));
     }
 
     #[test]

@@ -16,16 +16,45 @@ const CONFIG: Config = Config {
         ("enum_declaration", Kind::Enum),
         ("method_declaration", Kind::Fn),
         ("constructor_declaration", Kind::Fn),
+        ("destructor_declaration", Kind::Fn),
+        ("operator_declaration", Kind::Fn),
+        ("conversion_operator_declaration", Kind::Fn),
         ("local_function_statement", Kind::Fn),
     ],
     calls: &["invocation_expression", "object_creation_expression"],
-    name: name_field,
+    // A property or indexer is not listed, but the calls in its accessors belong to it.
+    scopes: &["property_declaration", "indexer_declaration"],
+    name,
     callee,
     imports: |_, _, _| {},
 };
 
 pub fn extract(root: Node, src: &str) -> Facts {
     super::generic::extract(root, src, &CONFIG)
+}
+
+/// `~X` for a destructor, `operator==` / `operator int` for operators, `this` for an indexer.
+fn name(node: Node, src: &str) -> Vec<String> {
+    let field = |f: &str| {
+        node.child_by_field_name(f)
+            .map(|n| text(n, src).to_string())
+    };
+    match node.kind() {
+        "destructor_declaration" => name_field(node, src)
+            .into_iter()
+            .map(|n| format!("~{n}"))
+            .collect(),
+        "operator_declaration" => field("operator")
+            .map(|op| format!("operator{op}"))
+            .into_iter()
+            .collect(),
+        "conversion_operator_declaration" => field("type")
+            .map(|ty| format!("operator {ty}"))
+            .into_iter()
+            .collect(),
+        "indexer_declaration" => vec!["this".to_string()],
+        _ => name_field(node, src),
+    }
 }
 
 /// `F()`, `a.F()`, `a?.F()` and `a.F<T>()` -> F; `new Foo<T>()` and `new a.Foo()` -> Foo.
@@ -104,6 +133,67 @@ namespace Shop {
         );
         assert_eq!(facts.symbols[2].signature, "public void Add(Item x)");
         assert!(facts.imports.is_empty());
+    }
+
+    #[test]
+    fn destructors_operators_and_property_accessors_are_callers() {
+        let facts = extract_file(
+            Lang::CSharp,
+            "class A {
+  ~A() { Free(); }
+  public static A operator +(A a, A b) { return Make(); }
+  public static implicit operator int(A a) { return Num(); }
+  public int P { get { return Get(); } set { Set(value); } }
+  public int this[int i] { get { return At(i); } }
+  public int Q => Calc();
+}
+",
+        )
+        .unwrap();
+        let symbols: Vec<_> = facts.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(symbols, vec!["A", "~A", "operator+", "operator int"]);
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.caller.as_deref()))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("Free", Some("~A")),
+                ("Make", Some("operator+")),
+                ("Num", Some("operator int")),
+                ("Get", Some("P")),
+                ("Set", Some("P")),
+                ("At", Some("this")),
+                ("Calc", Some("Q")),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_property_and_lambda_in_accessor() {
+        let facts = extract_file(
+            Lang::CSharp,
+            "class Outer { class Inner { public int P { get { return Get(); } } }
+  public int Q { get { return list.Select(x => Conv(x)).Count(); } } }
+",
+        )
+        .unwrap();
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.caller.as_deref()))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("Get", Some("P")),
+                ("Count", Some("Q")),
+                ("Select", Some("Q")),
+                ("Conv", Some("Q")),
+            ]
+        );
     }
 
     #[test]
