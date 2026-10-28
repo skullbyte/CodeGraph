@@ -52,11 +52,12 @@ pub fn callflow(index: &Index, name: &str, depth: usize) -> String {
     let mut labels: Vec<_> = ids.into_iter().collect();
     labels.sort_by_key(|(_, id)| *id);
     let mut out = vec!["flowchart LR".to_string()];
-    out.extend(
-        labels
-            .iter()
-            .map(|(n, id)| format!("    n{id}[\"{}\"]", n.replace('"', "#quot;"))),
-    );
+    out.extend(labels.iter().map(|(n, id)| {
+        format!(
+            "    n{id}[\"{}\"]",
+            n.replace('#', "#35;").replace('"', "#quot;")
+        )
+    }));
     out.extend(lines);
     out.join("\n") + "\n"
 }
@@ -105,9 +106,9 @@ mod tests {
     fn quotes_in_labels_are_escaped() {
         let mut index = index_of("fn a() { b(); }\nfn b() {}\n");
         let file = index.files.get_mut("a.rs").unwrap();
-        file.calls[0].callee = "b\"x".into();
-        file.symbols[1].name = "b\"x".into();
-        assert!(callflow(&index, "a", 1).contains("[\"b#quot;x\"]"));
+        file.calls[0].callee = "b\"x#y".into();
+        file.symbols[1].name = "b\"x#y".into();
+        assert!(callflow(&index, "a", 1).contains("[\"b#quot;x#35;y\"]"));
     }
 
     #[test]

@@ -322,3 +322,12 @@ fn mermaid_prints_flowchart_or_no_calls() {
         "no calls\n"
     );
 }
+
+#[test]
+fn mermaid_rejects_depth_zero() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let out = run(dir.path(), &["mermaid", "beta", "--depth", "0"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--depth"));
+}
