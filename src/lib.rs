@@ -8,6 +8,7 @@ pub mod index;
 pub mod lang;
 pub mod mermaid;
 pub mod model;
+pub mod obsidian;
 pub mod query;
 pub mod report;
 pub mod walk;

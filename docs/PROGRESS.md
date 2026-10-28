@@ -1,17 +1,17 @@
 # codegraph progress
 
 ## Now
-Goal: Part A phase 3 (Visuals): `codegraph html` is DONE and committed; next `mermaid`, then `obsidian`.
-State: Phases 1-2 done. html = 3 commits (d10f627 first page, c4de95b offline 3D space view, 50d60cf accessibility/keyboard fixes); review loop ended with "no remaining issues"; tested in Brave. `just check` green: 88 unit + 15 end-to-end tests; tree clean. `origin` = github.com/skullbyte/GraphGraph (fresh repo, the user pushes). History was rewritten on 2026-10-29 (identity), so all commit hashes changed.
-Next step: mermaid done and committed; now step 3 `obsidian` (test first), per ~/.claude/plans/floating-munching-lantern.md; tick the Graphify checklist and refresh it as features land.
+Goal: Part A phase 3 (Visuals) is DONE (html, mermaid, obsidian). Next: Phase 4 (more languages), after the user OK.
+State: Phases 1-2 done. html = 3 commits (d10f627 first page, c4de95b offline 3D space view, 50d60cf accessibility/keyboard fixes); review loop ended with "no remaining issues"; tested in Brave. `just check` green: 97 unit + 18 end-to-end tests; tree clean. `origin` = github.com/skullbyte/GraphGraph (fresh repo, the user pushes). History was rewritten on 2026-10-29 (identity), so all commit hashes changed.
+Next step: mermaid done and committed (75af0b9, 6009b3c); step 3 obsidian done and committed. Phase 3 complete; stop for the user OK before Phase 4 (more languages), per ~/.claude/plans/floating-munching-lantern.md; tick the Graphify checklist and refresh it as features land.
 
 ## Checklist
 - [x] Phase 1 (A.1) core engine: Rust + TS/TSX extraction, walker, parallel incremental index, codemap/graph.json/graph.bin, index/update/watch/def/callers/explain/path/affected/hubs, tsconfig aliases, benchmarks (done 2026-10-27)
 - [x] Phase 2 (A.2) Analysis: file-level Louvain communities, `codegraph report` -> .claude/GRAPH_REPORT.md, `codegraph benchmark` vs Graphify (reviewed, committed)
-- [ ] Phase 3 (A.3) Visuals
+- [x] Phase 3 (A.3) Visuals
   - [x] `codegraph html`: offline 3D space view + Graphify web features, reviewed, committed (d10f627, c4de95b, 50d60cf)
   - [x] Mermaid callflow export: `codegraph mermaid <name> [--depth 2]` (src/mermaid.rs, reviewed, committed)
-  - [ ] Obsidian vault export
+  - [x] Obsidian vault export: `codegraph obsidian [--out DIR]` (src/obsidian.rs, reviewed, committed)
 - [ ] Phase 4 (A.4) More languages: Python, Java, C#, Go, JavaScript, C/C++
 - [ ] Phase 5 (A.5) Precision: SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
 - [ ] Phase 6 (A.6) Claude Code integration: MCP server, skill, hook; replace codemap.sh/callers.sh only if benchmarks win
@@ -38,7 +38,7 @@ Exports (`G/export.py`, `G/exporters/`):
 - [x] graph.json (ours also graph.bin)
 - [x] GRAPH_REPORT.md (`report.py`)
 - [~] callflow-html (`callflow_html.py`: Mermaid page with pan/zoom; Mermaid from a CDN) -> ours: `codegraph mermaid` prints plain Mermaid text (callees only, depth, 60-edge cap), no page
-- [ ] obsidian vault + canvas (`to_obsidian`, `to_canvas`) -> Phase 3 step 3
+- [~] obsidian vault (`to_obsidian`): done as `codegraph obsidian` (file notes, community notes, `[[path.md|path]]` links); [ ] canvas (`to_canvas`)
 - [ ] tree (`tree_html.py`, D3 collapsible tree), wiki, svg, graphml, neo4j, falkordb -> Part B
 
 Commands:

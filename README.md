@@ -15,6 +15,9 @@ codegraph explain <name>     # definition + callers + callees
 codegraph affected <name>    # everything that depends on it (--depth N to limit)
 codegraph hubs               # most-connected symbols (--top N, default 10)
 codegraph report             # writes .claude/GRAPH_REPORT.md: key modules, hubs, surprising links, communities
+codegraph html               # writes .claude/graph.html: offline interactive map of the files
+codegraph mermaid <name>     # Mermaid flowchart of what <name> calls (--depth N, default 2)
+codegraph obsidian           # writes an Obsidian vault to .claude/obsidian (--out DIR); notes of deleted files are not removed
 codegraph benchmark          # vs Graphify (if installed): index time + explain answers (--name X, repeatable)
 codegraph watch [dir]        # index, then keep the index fresh as files change (--interval-ms)
 ```

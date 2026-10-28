@@ -331,3 +331,19 @@ fn mermaid_rejects_depth_zero() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--depth"));
 }
+
+#[test]
+fn obsidian_writes_vault_notes() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let out = run(dir.path(), &["obsidian"]);
+    assert!(out.status.success());
+    let vault = dir.path().join(".claude/obsidian");
+    assert!(vault.join("src/lib.rs.md").is_file());
+    assert!(vault.join("src/app.ts.md").is_file());
+    assert!(
+        stdout(&out).starts_with("wrote 3 notes to "),
+        "{}",
+        stdout(&out)
+    );
+}

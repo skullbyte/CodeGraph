@@ -13,7 +13,9 @@ use serde::Serialize;
 
 use codegraph::model::Index;
 use codegraph::query::{Affected, CallerHit, DefHit, Hop, Hub};
-use codegraph::{benchmark, codemap, community, html, index, mermaid, query, report, watch};
+use codegraph::{
+    benchmark, codemap, community, html, index, mermaid, obsidian, query, report, watch,
+};
 
 /// Fast offline code graph: where is X, who calls X, how does A reach B.
 #[derive(Parser)]
@@ -69,6 +71,12 @@ enum Command {
         /// How many call hops to follow.
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
         depth: u64,
+    },
+    /// Write an Obsidian vault: one linked note per file and per community.
+    Obsidian {
+        /// Vault folder (defaults to .claude/obsidian under the project).
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Compare codegraph with Graphify (if installed): index time and `explain` answers.
     Benchmark {
@@ -149,6 +157,14 @@ fn run(cli: Cli) -> Result<()> {
                     &chart
                 }
             );
+            Ok(())
+        }
+        Command::Obsidian { out } => {
+            let out = out
+                .clone()
+                .unwrap_or_else(|| cli.dir.join(".claude/obsidian"));
+            let count = obsidian::write(&load(&cli.dir)?, &out)?;
+            println!("wrote {count} notes to {}", out.display());
             Ok(())
         }
         Command::Benchmark { names } => cmd_benchmark(&cli.dir, names, cli.json),
