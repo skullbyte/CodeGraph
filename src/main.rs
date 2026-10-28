@@ -317,9 +317,14 @@ fn cmd_report(root: &Path, json: bool) -> Result<()> {
         return Ok(());
     }
     let path = root.join(".claude").join("GRAPH_REPORT.md");
-    index::write_atomic(&path, report::render(&project_name(root)?, &idx).as_bytes())?;
-    let count = community::detect(&community::file_graph(&idx)).len();
-    println!("wrote .claude/GRAPH_REPORT.md ({count} communities)");
+    let (text, count) = report::render(&project_name(root)?, &idx);
+    index::write_atomic(&path, text.as_bytes())?;
+    let noun = if count == 1 {
+        "community"
+    } else {
+        "communities"
+    };
+    println!("wrote .claude/GRAPH_REPORT.md ({count} {noun})");
     Ok(())
 }
 

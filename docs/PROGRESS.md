@@ -2,7 +2,7 @@
 
 ## Now
 Goal: Part A phase 2 (Analysis: community detection + GRAPH_REPORT.md + `codegraph benchmark` vs Graphify).
-State: Phase 1 is DONE and committed (16cca51, 23df615). Phase 2 is DONE, reviewed and committed (src/community.rs, report.rs, benchmark.rs; CLI `report`, `benchmark`). `just check` green: 76 unit + 13 end-to-end tests.
+State: Phase 1 is DONE and committed (8674776, 652302a). Phase 2 is DONE, reviewed and committed (src/community.rs, report.rs, benchmark.rs; CLI `report`, `benchmark`). `just check` green: 76 unit + 13 end-to-end tests.
 Next step: first check the "To check" list in Gotchas, then (after the user's OK) plan Phase 3 (visuals: `codegraph html`, Mermaid, Obsidian) in plan mode.
 
 ## Checklist
@@ -52,9 +52,7 @@ Next step: first check the "To check" list in Gotchas, then (after the user's OK
 - Phase 2 numbers (release): report tokio 53 ms (91 communities, biggest 179 files, name-match noise like `new_v4` links; Phase 5 fixes), pizzeria 2 ms (14 communities); benchmark: index tokio codegraph 44 ms vs graphify 4391 ms, pizzeria 3 vs 557 ms; explain formatPrice 144 tok/1 ms vs 313 tok/96 ms
 - `resolve_rust_module` fallback was O(imports x files) with string allocs per file; hoisted them (119 ms -> 13 ms on tokio)
 - To check later (open issues from the Phase 2 review, none block Phase 3):
-  - commit hashes at the top of this file (16cca51, 23df615) differ from `git log` (8674776, ec7304b): history was rewritten outside this session; verify nothing was lost
   - CLAUDE.md gained "No Co-Authored-By or other AI attribution" and was swept into the Phase 2 commit (652302a) by `git add -A`; confirm that was intended
-  - `cmd_report` runs community detection twice (src/main.rs) and prints "1 communities"; `report::render` recomputes file_graph + detect
   - unchecked `[]` lookups (`pos[..]`, `community_of[..]`, `index.files[..]`) in src/report.rs and src/community.rs: safe today, switch to `.get()` if the invariants change
   - untested: `benchmark` with Graphify installed, `benchmark --json`, multi-level Louvain with weighted edges
   - `benchmark` explain answers read the saved index, which can be older than the cold build it times

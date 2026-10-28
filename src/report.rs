@@ -16,7 +16,8 @@ const TOP: usize = 10;
 const SURPRISES: usize = 5;
 const FILES_SHOWN: usize = 8;
 
-pub fn render(project: &str, index: &Index) -> String {
+/// Returns the report text and the number of communities it covers.
+pub fn render(project: &str, index: &Index) -> (String, usize) {
     let graph = community::file_graph(index);
     let found = community::detect(&graph);
     let degree = degrees(&graph);
@@ -65,7 +66,7 @@ pub fn render(project: &str, index: &Index) -> String {
     for c in shown {
         let _ = write!(out, "\n{}", community_block(c, &pos, &degree));
     }
-    out
+    (out, found.len())
 }
 
 /// File index -> number of distinct files it is linked with.
@@ -216,7 +217,8 @@ mod tests {
 
     #[test]
     fn summary_counts_files_symbols_and_communities() {
-        let report = render("demo", &two_clusters());
+        let (report, count) = render("demo", &two_clusters());
+        assert_eq!(count, 2);
         assert!(report.starts_with("# Graph Report - demo\n"));
         let summary = section(&report, "## Summary");
         assert!(summary.contains("6 files · 6 symbols"), "{summary}");
@@ -228,20 +230,20 @@ mod tests {
 
     #[test]
     fn key_modules_rank_files_by_distinct_neighbours() {
-        let report = render("demo", &two_clusters());
+        let report = render("demo", &two_clusters()).0;
         let modules = section(&report, "## Key modules");
         assert!(modules.contains("1. `x/a3.rs` - 3 links"), "{modules}");
     }
 
     #[test]
     fn hubs_section_reuses_symbol_hubs() {
-        let report = render("demo", &two_clusters());
+        let report = render("demo", &two_clusters()).0;
         assert!(section(&report, "## Hubs").contains("`a1`"));
     }
 
     #[test]
     fn surprising_links_are_cross_community_calls() {
-        let report = render("demo", &two_clusters());
+        let report = render("demo", &two_clusters()).0;
         let links = section(&report, "## Surprising links");
         assert_eq!(
             links.trim(),
@@ -252,7 +254,7 @@ mod tests {
 
     #[test]
     fn communities_list_label_cohesion_and_files() {
-        let report = render("demo", &two_clusters());
+        let report = render("demo", &two_clusters()).0;
         let communities = section(&report, "## Communities");
         assert!(
             communities.contains("### Community 0 - x/a3.rs"),
@@ -274,7 +276,7 @@ mod tests {
         ];
         files.push(("p.rs", "fn p() { q(); }\n"));
         files.push(("q.rs", "fn q() {}\n"));
-        let report = render("demo", &index_of(&files));
+        let report = render("demo", &index_of(&files)).0;
         assert!(
             report.contains("2 communities (1 shown, 1 thin omitted)"),
             "{report}"
@@ -297,14 +299,15 @@ mod tests {
             .iter()
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
-        let report = render("demo", &index_of(&refs));
+        let report = render("demo", &index_of(&refs)).0;
         let communities = section(&report, "## Communities");
         assert!(communities.contains("(+"), "{communities}");
     }
 
     #[test]
     fn empty_index_still_renders() {
-        let report = render("demo", &Index::default());
+        let (report, count) = render("demo", &Index::default());
+        assert_eq!(count, 0);
         assert!(section(&report, "## Summary").contains("0 files"));
     }
 }

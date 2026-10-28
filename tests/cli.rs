@@ -245,7 +245,7 @@ fn report_writes_graph_report_and_json_lists_communities() {
     assert!(out.status.success());
     assert_eq!(
         stdout(&out).trim(),
-        "wrote .claude/GRAPH_REPORT.md (1 communities)"
+        "wrote .claude/GRAPH_REPORT.md (1 community)"
     );
     let report = fs::read_to_string(dir.path().join(".claude/GRAPH_REPORT.md")).unwrap();
     assert!(report.contains("## Key modules"));
