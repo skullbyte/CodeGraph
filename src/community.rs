@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use crate::model::{Index, Kind};
+use crate::model::{Index, Kind, Resolution};
 use crate::query;
 
 /// Undirected, weighted graph of files; `edges` keys are `(i, j)` with `i < j`.
@@ -51,12 +51,23 @@ pub fn call_sites(index: &Index, files: &[String]) -> Vec<CallSite> {
             }
         }
     }
+    let position: HashMap<&str, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.as_str(), i))
+        .collect();
     let mut sites = Vec::new();
     for (from, file) in files.iter().enumerate() {
-        for call in &index.files[file].calls {
-            let Some(&[to]) = homes.get(call.callee.as_str()).map(Vec::as_slice) else {
-                continue;
+        for (call, target) in index.files[file].graph_calls() {
+            // SCIP names the defining file; without it, accept a name defined in one file only.
+            let to = match target {
+                Some(Resolution::Def { path, .. }) => position.get(path.as_str()).copied(),
+                _ => match homes.get(call.callee.as_str()).map(Vec::as_slice) {
+                    Some(&[to]) => Some(to),
+                    _ => None,
+                },
             };
+            let Some(to) = to else { continue };
             sites.push(CallSite {
                 from,
                 to,
@@ -246,6 +257,39 @@ mod tests {
 
     fn names(c: &Community) -> Vec<&str> {
         c.files.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn scip_resolutions_pick_the_defining_file_and_drop_external_calls() {
+        use crate::model::{Resolution, ResolvedCall};
+        let mut index = index_of(&[
+            ("x.rs", "fn x() { new(); new(); new(); }\n"),
+            ("b.rs", "fn new() {}\n"),
+            ("c.rs", "fn new() {}\n"),
+        ]);
+        let files: Vec<String> = ["x.rs", "b.rs", "c.rs"].map(String::from).to_vec();
+        assert!(
+            call_sites(&index, &files).is_empty(),
+            "two homes: ambiguous"
+        );
+        index.files.get_mut("x.rs").unwrap().resolved = vec![
+            ResolvedCall {
+                call: 0,
+                target: Resolution::Def {
+                    path: "c.rs".into(),
+                    line: 1,
+                },
+            },
+            ResolvedCall {
+                call: 1,
+                target: Resolution::External,
+            },
+        ];
+        let sites: Vec<_> = call_sites(&index, &files)
+            .iter()
+            .map(|s| (s.from, s.to))
+            .collect();
+        assert_eq!(sites, vec![(0, 2)]);
     }
 
     #[test]

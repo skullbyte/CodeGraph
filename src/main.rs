@@ -14,7 +14,7 @@ use serde::Serialize;
 use codegraph::model::Index;
 use codegraph::query::{Affected, CallerHit, DefHit, Hop, Hub};
 use codegraph::{
-    benchmark, codemap, community, html, index, mermaid, obsidian, query, report, watch,
+    benchmark, codemap, community, html, index, mermaid, obsidian, query, report, scip, watch,
 };
 
 /// Fast offline code graph: where is X, who calls X, how does A reach B.
@@ -77,6 +77,12 @@ enum Command {
         /// Vault folder (defaults to .claude/obsidian under the project).
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Make `callers`, `hubs` and the graph exact: read a SCIP index (from `rust-analyzer scip .`
+    /// or `scip-typescript index`) and record what every call really refers to.
+    Scip {
+        /// The index file (defaults to index.scip in the project root).
+        file: Option<PathBuf>,
     },
     /// Compare codegraph with Graphify (if installed): index time and `explain` answers.
     Benchmark {
@@ -159,6 +165,7 @@ fn run(cli: Cli) -> Result<()> {
             );
             Ok(())
         }
+        Command::Scip { file } => cmd_scip(&cli.dir, file.as_deref(), cli.json),
         Command::Obsidian { out } => {
             let out = out
                 .clone()
@@ -372,6 +379,32 @@ fn cmd_html(root: &Path) -> Result<()> {
     let path = root.join(".claude").join("graph.html");
     index::write_atomic(&path, page.as_bytes())?;
     println!("wrote .claude/graph.html ({files} files)");
+    Ok(())
+}
+
+fn cmd_scip(root: &Path, file: Option<&Path>, json: bool) -> Result<()> {
+    let path = file.map_or_else(|| root.join("index.scip"), Path::to_path_buf);
+    let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let docs = scip::parse(&data).with_context(|| format!("parsing {}", path.display()))?;
+    let _lock = index::lock(root)?;
+    let mut idx = load(root)?;
+    let stats = scip::apply(&mut idx, &docs);
+    index::save(root, &idx)?;
+    if json {
+        println!("{}", serde_json::to_string(&stats)?);
+        return Ok(());
+    }
+    print!(
+        "resolved {} of {} calls ({} external)",
+        stats.resolved, stats.calls, stats.external
+    );
+    if stats.unknown_documents > 0 {
+        print!(
+            "; {} index documents match no indexed file (was it built from another root?)",
+            stats.unknown_documents
+        );
+    }
+    println!();
     Ok(())
 }
 

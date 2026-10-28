@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use serde::Serialize;
 
 use crate::lang::Lang;
-use crate::model::{FileEntry, Index, Kind};
+use crate::model::{FileEntry, Index, Kind, Resolution};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DefHit {
@@ -26,12 +26,19 @@ pub struct CallerHit {
     pub line: u32,
     /// Enclosing function; `None` means top level.
     pub caller: Option<String>,
+    /// Definition this call goes to (`path:line`), shown only when SCIP told several apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 impl CallerHit {
     pub fn text(&self) -> String {
         let caller = self.caller.as_deref().unwrap_or("(top level)");
-        format!("{}:{}  in {caller}", self.path, self.line)
+        let base = format!("{}:{}  in {caller}", self.path, self.line);
+        match &self.target {
+            Some(target) => format!("{base}  -> {target}"),
+            None => base,
+        }
     }
 }
 
@@ -76,20 +83,29 @@ pub fn def(index: &Index, name: &str) -> Vec<DefHit> {
 
 /// Every call site of `name`, with the function it sits in.
 pub fn callers(index: &Index, name: &str) -> Vec<CallerHit> {
-    index
+    let mut hits: Vec<CallerHit> = index
         .files
         .values()
         .flat_map(|f| {
-            f.calls
-                .iter()
-                .filter(move |c| c.callee == name)
-                .map(|c| CallerHit {
+            f.graph_calls()
+                .filter(move |(c, _)| c.callee == name)
+                .map(|(c, target)| CallerHit {
                     path: f.path.clone(),
                     line: c.line,
                     caller: c.caller.clone(),
+                    target: match target {
+                        Some(Resolution::Def { path, line }) => Some(format!("{path}:{line}")),
+                        _ => None,
+                    },
                 })
         })
-        .collect()
+        .collect();
+    // With one definition there is nothing to tell apart; with several, say which each hit calls.
+    let definitions: BTreeSet<_> = hits.iter().filter_map(|h| h.target.as_deref()).collect();
+    if definitions.len() < 2 {
+        hits.iter_mut().for_each(|h| h.target = None);
+    }
+    hits
 }
 
 /// Shortest chain from `from` to `to`. Two indexed file paths are linked by imports;
@@ -152,7 +168,7 @@ fn bfs(edges: &Edges, from: &str, to: &str) -> Vec<String> {
 /// Function name -> names it calls. A caller like `pub async fn foo<T>` becomes `foo`.
 pub(crate) fn call_edges(index: &Index) -> Edges {
     let mut edges = Edges::new();
-    for call in index.files.values().flat_map(|f| &f.calls) {
+    for (call, _) in index.files.values().flat_map(|f| f.graph_calls()) {
         if let Some(caller) = call.caller.as_deref() {
             edges
                 .entry(bare_name(caller))
@@ -508,7 +524,8 @@ pub fn explain(index: &Index, name: &str) -> Explain {
     for call in index
         .files
         .values()
-        .flat_map(|f| &f.calls)
+        .flat_map(|f| f.graph_calls())
+        .map(|(call, _)| call)
         .filter(|c| c.callee == name)
     {
         let Some(caller) = call.caller.as_deref().map(bare_name) else {
@@ -518,7 +535,7 @@ pub fn explain(index: &Index, name: &str) -> Explain {
     }
     let mut outgoing: BTreeMap<String, usize> = BTreeMap::new();
     for file in defs.iter().filter_map(|d| index.files.get(&d.path)) {
-        for call in &file.calls {
+        for (call, _) in file.graph_calls() {
             if call.caller.as_deref().map(bare_name).as_deref() == Some(name) {
                 *outgoing.entry(call.callee.clone()).or_default() += 1;
             }
@@ -596,7 +613,7 @@ pub fn hubs(index: &Index, top: usize) -> Vec<Hub> {
 mod tests {
     use super::*;
     use crate::lang::{self, Lang};
-    use crate::model::FileEntry;
+    use crate::model::{FileEntry, ResolvedCall};
 
     fn index_of(files: &[(&str, &str)]) -> Index {
         let mut index = Index {
@@ -895,6 +912,60 @@ mod tests {
         ]);
         assert_eq!(path(&index, "src/a/main.c", "src/x.h").len(), 2);
         assert!(path(&index, "src/a/main.c", "one/util.h").is_empty());
+    }
+
+    fn resolve(index: &mut Index, file: &str, call: u32, target: Resolution) {
+        let entry = index.files.get_mut(file).unwrap();
+        entry.resolved.push(ResolvedCall { call, target });
+    }
+
+    fn def_at(path: &str, line: u32) -> Resolution {
+        Resolution::Def {
+            path: path.into(),
+            line,
+        }
+    }
+
+    #[test]
+    fn scip_resolutions_drop_external_calls_and_disambiguate_callers() {
+        let mut index = index_of(&[
+            (
+                "a.rs",
+                "fn new() {}\nfn run() { new(); }\nfn run2() { new(); }\n",
+            ),
+            (
+                "b.rs",
+                "fn new() {}\nfn go() { new(); }\nfn plain() { new(); }\n",
+            ),
+        ]);
+        resolve(&mut index, "a.rs", 0, def_at("a.rs", 1));
+        resolve(&mut index, "a.rs", 1, Resolution::External);
+        resolve(&mut index, "b.rs", 0, def_at("b.rs", 1));
+        let hits: Vec<_> = callers(&index, "new").iter().map(CallerHit::text).collect();
+        assert_eq!(
+            hits,
+            vec![
+                "a.rs:2  in fn run  -> a.rs:1",
+                "b.rs:2  in fn go  -> b.rs:1",
+                "b.rs:3  in fn plain",
+            ]
+        );
+        // One definition among the hits: nothing to disambiguate, no arrow.
+        let mut single = index_of(&[("a.rs", "fn new() {}\nfn run() { new(); }\n")]);
+        resolve(&mut single, "a.rs", 0, def_at("a.rs", 1));
+        assert_eq!(callers(&single, "new")[0].text(), "a.rs:2  in fn run");
+    }
+
+    #[test]
+    fn external_calls_are_not_graph_edges() {
+        let mut index = index_of(&[("a.rs", "fn b() {}\nfn run() { b(); }\nfn two() { b(); }\n")]);
+        resolve(&mut index, "a.rs", 0, Resolution::External);
+        let who: Vec<_> = affected(&index, "b", None)
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(who, vec!["two"]);
+        assert_eq!(explain(&index, "b").incoming.len(), 1);
     }
 
     #[test]

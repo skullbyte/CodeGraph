@@ -1,8 +1,8 @@
 # codegraph progress
 
 ## Now
-Goal: Phase 4 (more languages) is DONE and committed. Phases 1-4 done. Next: Phase 5 (SCIP precision), after the user OK.
-State: 8 language families indexed (Rust, TS/TSX, JS, Python, Java, C#, Go, C/C++). `just check` green: 124 unit + 19 end-to-end tests. `origin` = github.com/skullbyte/GraphGraph (the user pushes). Commit hashes changed on 2026-10-29 (identity rewrite).
+Goal: Phase 5 (SCIP precision) committed (plan: ~/.claude/plans/glowing-skipping-mountain.md). Open: the real-world check on tokio and the TS copy needs `rustup component add rust-analyzer` and `npm i -g @sourcegraph/scip-typescript`, run by the user; then Phase 6 (MCP server, skill, hook) after the user OK.
+State: 8 language families indexed (Rust, TS/TSX, JS, Python, Java, C#, Go, C/C++); `codegraph scip` imports SCIP. `just check` green: 149 unit + 20 end-to-end tests. `origin` = github.com/skullbyte/GraphGraph (the user pushes). Commit hashes changed on 2026-10-29 (identity rewrite).
 Next step: stop for the user OK, then Phase 5 (A.5): import SCIP from rust-analyzer / scip-typescript to fix name-based matching (see docs/REQUIREMENTS.md); plan first. Keep the Graphify checklist refreshed as features land.
 
 ## Checklist
@@ -18,7 +18,7 @@ Next step: stop for the user OK, then Phase 5 (A.5): import SCIP from rust-analy
   - [x] Java (src/lang/java.rs; imports resolve to a unique `a/b/C.java`)
   - [x] C# (src/lang/csharp.rs) and Go (src/lang/golang.rs): no import edges (namespace / package, not a file); link through calls only
   - [x] C/C++ (src/lang/c.rs, one table; `.h` tried as C, then C++ if that has errors; typedefs give every name)
-- [ ] Phase 5 (A.5) Precision: SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
+- [~] Phase 5 (A.5) Precision (code done and tested with synthetic SCIP files; real rust-analyzer / scip-typescript check waits for the user to install them): SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
 - [ ] Phase 6 (A.6) Claude Code integration: MCP server, skill, hook; replace codemap.sh/callers.sh only if benchmarks win
 - [ ] Phase 7 (A.7) Documents: semantic pass over docs/PDFs/markdown via a skill
 - [ ] Part B: full Graphify parity (order chosen by the user later)
@@ -114,3 +114,4 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
 - 2026-10-30 Phase 4: one table-driven walker (`src/lang/generic.rs`, idea from Graphify's `LanguageConfig`) plus a small module per language; JS reuses the TSX grammar; C and C++ share one table and `.h` is tried as C then C++; C#/Go record no imports (namespace/package, not files); after Phase 4 tokio cached index 26 ms, update 20 ms (unchanged), release binary 20 MB
 - 2026-10-30 Obsidian vault verified in real Obsidian 1.14.5 (via its debug port, `app.metadataCache`): 107 notes, 768 links resolved, 0 unresolved. Java `this(..)`/`super(..)`/`A::f` and C# `global::Foo` are calls now.
 - 2026-10-30 Phase 4 gaps closed: C# destructors/operators are symbols and property/indexer accessors are callers (`Config.scopes`); `Config.name` returns several names (multi-name typedefs); `.h` uses `Lang::Header` (C grammar, C++ when C has errors). Real-code check (copies in git-ignored `bench/real/`): Go `net` 435 files, glm 291 C++ files, Graphify's Python package 97 files, a Spring app 6 Java files all index; names like `Close`/`len` top the hubs (name matching, Phase 5)
+- 2026-10-30 Phase 5 design: hand-written SCIP protobuf reader (`src/scip.rs`, no crate; field numbers from sourcegraph/scip scip.proto); resolutions live per file in `FileEntry.resolved` (call position -> Def{path,line} | External), not on `Call`, because postcard (graph.bin) cannot skip fields and graph.json would grow ~16 bytes per call; `External` calls are dropped from callers/explain/affected/hubs/path/mermaid edges and from community links; Graphify's `scip_ingest.py` is only a skeleton for a simplified JSON shape (not wired), so this is an extra, not a parity item

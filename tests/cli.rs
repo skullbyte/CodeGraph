@@ -395,3 +395,55 @@ fn mixed_language_project_indexes_and_answers_callers() {
     );
     assert!(stdout(&run(dir.path(), &["def", "main"])).contains("main.c:2"));
 }
+
+/// A SCIP index with one document whose occurrences are (0-based line, symbol, is definition).
+fn scip_bytes(path: &str, occurrences: &[(u64, &str, bool)]) -> Vec<u8> {
+    fn field(number: u8, data: &[u8]) -> Vec<u8> {
+        [vec![number << 3 | 2, data.len() as u8], data.to_vec()].concat()
+    }
+    let mut doc = field(1, path.as_bytes());
+    for (line, symbol, definition) in occurrences {
+        let range = field(1, &[*line as u8, 0, 5]);
+        let roles = vec![3 << 3, u8::from(*definition)];
+        doc.extend(field(
+            2,
+            &[range, field(2, symbol.as_bytes()), roles].concat(),
+        ));
+    }
+    field(2, &doc)
+}
+
+#[test]
+fn scip_resolves_calls_and_reports() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    // src/lib.rs line 3 (0-based 2) calls alpha, defined on line 1.
+    let data = scip_bytes(
+        "src/lib.rs",
+        &[
+            (0, "r c p 1 lib/alpha().", true),
+            (2, "r c p 1 lib/alpha().", false),
+        ],
+    );
+    fs::write(dir.path().join("index.scip"), data).unwrap();
+    let out = run(dir.path(), &["scip"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stdout(&out), "resolved 1 of 1 calls (0 external)\n");
+
+    let json = stdout(&run(dir.path(), &["scip", "--json"]));
+    assert_eq!(
+        json.trim(),
+        r#"{"calls":1,"resolved":1,"external":0,"unknown_documents":0}"#
+    );
+    // A reference with no definition in the project is the standard library or a dependency.
+    let external = scip_bytes("src/lib.rs", &[(2, "r c core 1 lib/alpha().", false)]);
+    fs::write(dir.path().join("index.scip"), external).unwrap();
+    run(dir.path(), &["scip"]);
+    assert_eq!(stdout(&run(dir.path(), &["callers", "alpha"])), "");
+    let bad = run(dir.path(), &["scip", "missing.scip"]);
+    assert!(!bad.status.success());
+}

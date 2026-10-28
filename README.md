@@ -18,10 +18,25 @@ codegraph report             # writes .claude/GRAPH_REPORT.md: key modules, hubs
 codegraph html               # writes .claude/graph.html: offline interactive map of the files
 codegraph mermaid <name>     # Mermaid flowchart of what <name> calls (--depth N, default 2)
 codegraph obsidian           # writes an Obsidian vault to .claude/obsidian (--out DIR); notes of deleted files are not removed
+codegraph scip [index.scip]  # makes callers/hubs/communities exact from a SCIP index (see below)
 codegraph benchmark          # vs Graphify (if installed): index time + explain answers (--name X, repeatable)
 codegraph watch [dir]        # index, then keep the index fresh as files change (--interval-ms)
 ```
 Add `--json` for JSON output and `--dir <root>` to point at another project.
+
+## Exact calls with SCIP (optional)
+By default `callers` matches calls by name. A SCIP index, written by the language's own compiler
+tooling, says which function each call really goes to, so calls into the standard library
+(`new`, `clone`, ...) stop showing up as project edges:
+
+    rust-analyzer scip .             # Rust: writes index.scip
+    scip-typescript index            # TypeScript/JavaScript: writes index.scip
+    codegraph index && codegraph scip
+
+When one name has several project definitions, `callers` adds `-> path:line` to say which one.
+Re-parsing a changed file forgets its answers until `codegraph scip` runs again, and the
+`-> path:line` of a definition is where it was when the index was made: re-run `codegraph scip`
+after editing.
 
 ## License
 Apache License 2.0; see [LICENSE](LICENSE).

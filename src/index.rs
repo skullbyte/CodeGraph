@@ -260,6 +260,7 @@ fn entry_from(rel: &str, src: &str, hash: String) -> Result<FileEntry> {
         symbols: facts.symbols,
         imports: facts.imports,
         calls: facts.calls,
+        resolved: Vec::new(),
     })
 }
 

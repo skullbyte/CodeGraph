@@ -11,5 +11,6 @@ pub mod model;
 pub mod obsidian;
 pub mod query;
 pub mod report;
+pub mod scip;
 pub mod walk;
 pub mod watch;
