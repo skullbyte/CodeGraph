@@ -185,18 +185,22 @@ pub(crate) fn import_edges(index: &Index) -> Edges {
     edges
 }
 
-/// Imports worth showing for a file: all of a Rust file's, but for TypeScript only relative paths
-/// and aliases (packages like `react` have no file in the project).
+/// Imports worth showing for a file: all of a Rust file's; for TypeScript/JavaScript only relative
+/// paths and aliases (packages like `react` have no file in the project); for the other languages
+/// only imports that resolve to a project file.
 pub fn local_imports<'a>(index: &Index, entry: &'a FileEntry) -> Vec<&'a str> {
-    let is_rust = Lang::from_path(&entry.path) == Some(Lang::Rust);
+    let lang = Lang::from_path(&entry.path);
+    let web = matches!(lang, Some(Lang::TypeScript | Lang::Tsx | Lang::JavaScript));
     entry
         .imports
         .iter()
         .map(String::as_str)
-        .filter(|imp| {
-            is_rust
-                || imp.starts_with('.')
-                || index.aliases.keys().any(|p| imp.starts_with(p.as_str()))
+        .filter(|imp| match lang {
+            Some(Lang::Rust) => true,
+            _ if web => {
+                imp.starts_with('.') || index.aliases.keys().any(|p| imp.starts_with(p.as_str()))
+            }
+            _ => resolve_import(&index.files, &index.aliases, &entry.path, imp).is_some(),
         })
         .collect()
 }
@@ -209,6 +213,7 @@ fn resolve_import<V>(
 ) -> Option<String> {
     match Lang::from_path(from) {
         Some(Lang::Rust) => resolve_rust_module(files, from, imp),
+        Some(Lang::Python) => resolve_python_module(files, from, imp),
         _ => resolve_ts_import(files, aliases, from, imp),
     }
 }
@@ -258,6 +263,43 @@ fn import_base(aliases: &BTreeMap<String, String>, dir: &str, imp: &str) -> Opti
         .filter(|(p, _)| imp.starts_with(p.as_str()))
         .max_by_key(|(p, _)| p.len())?;
     Some(format!("{folder}{}", &imp[prefix.len()..]))
+}
+
+/// Python module `imp`: `.x` / `..x` count folders up from the file; `a.b` is `a/b.py` or
+/// `a/b/__init__.py`, from the project root or, failing that, a single project-wide match.
+fn resolve_python_module<V>(files: &BTreeMap<String, V>, from: &str, imp: &str) -> Option<String> {
+    let dots = imp.chars().take_while(|&c| c == '.').count();
+    let rest = imp[dots..].replace('.', "/");
+    if rest.is_empty() {
+        return None;
+    }
+    let candidates = |base: &str| {
+        let join = |tail: &str| match (base.is_empty(), rest.is_empty()) {
+            (true, _) => format!("{rest}{tail}"),
+            (false, true) => format!("{base}{tail}"),
+            (false, false) => format!("{base}/{rest}{tail}"),
+        };
+        [join(".py"), join("/__init__.py")]
+    };
+    if dots > 0 {
+        let mut base = from.rsplit_once('/').map_or("", |(d, _)| d);
+        for _ in 1..dots {
+            // Climbing above the project root has no file to find.
+            base = base
+                .rsplit_once('/')
+                .map_or_else(|| (!base.is_empty()).then_some(""), |(d, _)| Some(d))?;
+        }
+        return candidates(base).into_iter().find(|p| files.contains_key(p));
+    }
+    if let Some(found) = candidates("").into_iter().find(|p| files.contains_key(p)) {
+        return Some(found);
+    }
+    let suffixes = candidates("").map(|c| format!("/{c}"));
+    let mut hits = files
+        .keys()
+        .filter(|f| suffixes.iter().any(|s| f.ends_with(s.as_str())));
+    let first = hits.next()?;
+    hits.next().is_none().then(|| first.clone())
 }
 
 /// Rust module `imp` declared in `from`. `mod a;` in `foo.rs` lives in `foo/a.rs`; in `mod.rs`,
@@ -709,6 +751,64 @@ mod tests {
             .concat(),
         );
         assert_eq!(path(&js, "src/a.js", "src/x.js").len(), 2);
+    }
+
+    #[test]
+    fn python_imports_resolve_relative_dotted_and_package_modules() {
+        let index = index_of(&[
+            (
+                "app/main.py",
+                "from .util import u\nfrom . import pkg\nfrom ..top import t\nimport app.models.user\nimport os\n",
+            ),
+            ("app/util.py", "def u(): pass\n"),
+            ("app/pkg/__init__.py", "def p(): pass\n"),
+            ("top.py", "def t(): pass\n"),
+            ("app/models/user.py", "def user(): pass\n"),
+        ]);
+        for target in [
+            "app/util.py",
+            "app/pkg/__init__.py",
+            "top.py",
+            "app/models/user.py",
+        ] {
+            assert_eq!(path(&index, "app/main.py", target).len(), 2, "{target}");
+        }
+    }
+
+    #[test]
+    fn python_relative_imports_cannot_climb_above_the_root() {
+        let index = index_of(&[
+            ("app/main.py", "from ...x import y\nfrom . import z\n"),
+            ("x.py", "def y(): pass\n"),
+            ("app/z.py", "def z(): pass\n"),
+        ]);
+        assert!(path(&index, "app/main.py", "x.py").is_empty());
+        assert_eq!(path(&index, "app/main.py", "app/z.py").len(), 2);
+    }
+
+    #[test]
+    fn python_local_imports_show_only_project_files() {
+        let index = index_of(&[
+            (
+                "app/main.py",
+                "import os\nfrom .util import u\nfrom pkg import sub\n",
+            ),
+            ("app/util.py", "def u(): pass\n"),
+            ("pkg/sub.py", "def s(): pass\n"),
+        ]);
+        let entry = &index.files["app/main.py"];
+        assert_eq!(local_imports(&index, entry), vec![".util", "pkg.sub"]);
+        assert_eq!(path(&index, "app/main.py", "pkg/sub.py").len(), 2);
+    }
+
+    #[test]
+    fn ambiguous_python_module_names_make_no_edge() {
+        let index = index_of(&[
+            ("main.py", "import util\n"),
+            ("a/util.py", "def u(): pass\n"),
+            ("b/util.py", "def u(): pass\n"),
+        ]);
+        assert!(path(&index, "main.py", "a/util.py").is_empty());
     }
 
     #[test]
