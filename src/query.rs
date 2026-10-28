@@ -221,24 +221,43 @@ fn resolve_ts_import<V>(
     imp: &str,
 ) -> Option<String> {
     let dir = from.rsplit_once('/').map_or("", |(d, _)| d);
-    let imp = [".js", ".jsx", ".ts", ".tsx"]
+    // TS writes `./x.js` for `x.ts`, so a TS importer tries the stripped name first; a JS importer
+    // means the file itself, so it tries the name as written first.
+    let stripped = [".js", ".jsx", ".ts", ".tsx"]
         .iter()
         .find_map(|ext| imp.strip_suffix(ext))
         .unwrap_or(imp);
-    let base = if imp.starts_with('.') {
-        normalize(&format!("{dir}/{imp}"))
+    let from_ts = matches!(Lang::from_path(from), Some(Lang::TypeScript | Lang::Tsx));
+    let order = if from_ts {
+        [stripped, imp]
     } else {
-        // The longest matching prefix wins, so `@components/` beats `@/`.
-        let (prefix, folder) = aliases
-            .iter()
-            .filter(|(p, _)| imp.starts_with(p.as_str()))
-            .max_by_key(|(p, _)| p.len())?;
-        format!("{folder}{}", &imp[prefix.len()..])
+        [imp, stripped]
     };
-    [".ts", ".tsx", "/index.ts", "/index.tsx"]
+    order.iter().find_map(|name| {
+        let base = import_base(aliases, dir, name)?;
+        ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]
+            .iter()
+            .map(|ext| format!("{base}{ext}"))
+            .chain(
+                ["/index.ts", "/index.tsx", "/index.js", "/index.jsx"]
+                    .iter()
+                    .map(|index| format!("{base}{index}")),
+            )
+            .find(|p| files.contains_key(p))
+    })
+}
+
+/// Folder-relative path of an import: `./x` next to the file, or an alias replaced by its folder.
+fn import_base(aliases: &BTreeMap<String, String>, dir: &str, imp: &str) -> Option<String> {
+    if imp.starts_with('.') {
+        return Some(normalize(&format!("{dir}/{imp}")));
+    }
+    // The longest matching prefix wins, so `@components/` beats `@/`.
+    let (prefix, folder) = aliases
         .iter()
-        .map(|ext| format!("{base}{ext}"))
-        .find(|p| files.contains_key(p))
+        .filter(|(p, _)| imp.starts_with(p.as_str()))
+        .max_by_key(|(p, _)| p.len())?;
+    Some(format!("{folder}{}", &imp[prefix.len()..]))
 }
 
 /// Rust module `imp` declared in `from`. `mod a;` in `foo.rs` lives in `foo/a.rs`; in `mod.rs`,
@@ -646,6 +665,50 @@ mod tests {
         ]);
         assert_eq!(path(&index, "src/app.ts", "src/x.ts").len(), 2);
         assert_eq!(path(&index, "src/app.ts", "src/lib/y.ts").len(), 2);
+    }
+
+    #[test]
+    fn js_files_are_parsed_and_their_imports_resolve() {
+        let index = index_of(&[
+            (
+                "src/app.js",
+                "import { x } from './x.js';\nimport y from './y';\nimport z from './z.mjs';\nexport function run() { x(); }\n",
+            ),
+            ("src/x.js", "export function x() {}\n"),
+            ("src/y/index.jsx", "export default function y() {}\n"),
+            ("src/z.mjs", "export default function z() {}\n"),
+        ]);
+        assert_eq!(def(&index, "run").len(), 1);
+        for target in ["src/x.js", "src/y/index.jsx", "src/z.mjs"] {
+            assert_eq!(path(&index, "src/app.js", target).len(), 2, "{target}");
+        }
+    }
+
+    #[test]
+    fn js_suffix_order_depends_on_the_importer() {
+        let files = [
+            ("src/x.ts", "export const x = 1;\n"),
+            ("src/x.js", "export const x = 2;\n"),
+            ("src/lib/index.js", "export const l = 1;\n"),
+        ];
+        let ts = index_of(
+            &[
+                &files[..],
+                &[("src/a.ts", "import './x.js';\nimport '@/lib';\n")],
+            ]
+            .concat(),
+        );
+        assert_eq!(path(&ts, "src/a.ts", "src/x.ts").len(), 2);
+        assert!(path(&ts, "src/a.ts", "src/x.js").is_empty());
+        assert_eq!(path(&ts, "src/a.ts", "src/lib/index.js").len(), 2);
+        let js = index_of(
+            &[
+                &files[..],
+                &[("src/a.js", "import './x.js';\nimport './x.config';\n")],
+            ]
+            .concat(),
+        );
+        assert_eq!(path(&js, "src/a.js", "src/x.js").len(), 2);
     }
 
     #[test]

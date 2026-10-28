@@ -113,12 +113,30 @@ fn add_call(node: Node, src: &str, facts: &mut Facts, enclosing: Option<&str>) {
         "member_expression" => field_text(f, "property", src).unwrap_or(""),
         _ => "",
     };
+    if callee == "require" && f.kind() == "identifier" {
+        add_require(node, src, facts);
+    }
     if !callee.is_empty() {
         facts.calls.push(Call {
             callee: callee.to_string(),
             line: line_of(node),
             caller: enclosing.map(String::from),
         });
+    }
+}
+
+/// CommonJS `require('./x')`: only a plain string argument counts.
+fn add_require(node: Node, src: &str, facts: &mut Facts) {
+    let Some(arg) = node
+        .child_by_field_name("arguments")
+        .and_then(|a| a.named_child(0))
+        .filter(|a| a.kind() == "string")
+    else {
+        return;
+    };
+    let path = text(arg, src).trim_matches(['\'', '"']);
+    if !path.is_empty() {
+        facts.imports.push(path.to_string());
     }
 }
 
@@ -208,6 +226,16 @@ function local() { show(1); }
             ("show", 20, Some("function local")),
         ];
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn require_with_a_string_is_an_import() {
+        let facts = extract_file(
+            Lang::JavaScript,
+            "const a = require('./a');\nconst b = require(name);\n",
+        )
+        .unwrap();
+        assert_eq!(facts.imports, vec!["./a"]);
     }
 
     #[test]

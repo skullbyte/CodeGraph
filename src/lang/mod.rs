@@ -22,6 +22,8 @@ pub enum Lang {
     Rust,
     TypeScript,
     Tsx,
+    /// Parsed with the TSX grammar: JavaScript (and JSX) is a subset of it.
+    JavaScript,
 }
 
 impl Lang {
@@ -33,6 +35,7 @@ impl Lang {
             "rs" => Some(Lang::Rust),
             "ts" => Some(Lang::TypeScript),
             "tsx" => Some(Lang::Tsx),
+            "js" | "jsx" | "mjs" | "cjs" => Some(Lang::JavaScript),
             _ => None,
         }
     }
@@ -41,7 +44,7 @@ impl Lang {
         match self {
             Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Lang::Tsx | Lang::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
 }
@@ -55,7 +58,9 @@ pub fn extract(lang: Lang, src: &str) -> Result<Facts> {
         .ok_or_else(|| anyhow!("parser gave no tree"))?;
     let mut facts = match lang {
         Lang::Rust => rust::extract(tree.root_node(), src),
-        Lang::TypeScript | Lang::Tsx => typescript::extract(tree.root_node(), src),
+        Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
+            typescript::extract(tree.root_node(), src)
+        }
     };
     facts.imports.sort();
     facts.imports.dedup();

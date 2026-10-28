@@ -1,7 +1,7 @@
 # codegraph progress
 
 ## Now
-Goal: Part A phase 3 (Visuals) is DONE (html, mermaid, obsidian). Next: Phase 4 (more languages), after the user OK.
+Goal: Phase 4 (more languages), plan approved. Phase 3 done. JavaScript committed; next Python, blocked until the user runs the `cargo add` line.
 State: Phases 1-2 done. html = 3 commits (d10f627 first page, c4de95b offline 3D space view, 50d60cf accessibility/keyboard fixes); review loop ended with "no remaining issues"; tested in Brave. `just check` green: 97 unit + 18 end-to-end tests; tree clean. `origin` = github.com/skullbyte/GraphGraph (fresh repo, the user pushes). History was rewritten on 2026-10-29 (identity), so all commit hashes changed.
 Next step: mermaid done and committed (75af0b9, 6009b3c); step 3 obsidian done and committed. Phase 3 complete; stop for the user OK before Phase 4 (more languages), per ~/.claude/plans/floating-munching-lantern.md; tick the Graphify checklist and refresh it as features land.
 
@@ -12,7 +12,9 @@ Next step: mermaid done and committed (75af0b9, 6009b3c); step 3 obsidian done a
   - [x] `codegraph html`: offline 3D space view + Graphify web features, reviewed, committed (d10f627, c4de95b, 50d60cf)
   - [x] Mermaid callflow export: `codegraph mermaid <name> [--depth 2]` (src/mermaid.rs, reviewed, committed)
   - [x] Obsidian vault export: `codegraph obsidian [--out DIR]` (src/obsidian.rs, reviewed, committed)
-- [ ] Phase 4 (A.4) More languages: Python, Java, C#, Go, JavaScript, C/C++
+- [ ] Phase 4 (A.4) More languages: plan in ~/.claude/plans/glowing-skipping-mountain.md
+  - [x] JavaScript (.js .jsx .mjs .cjs; TSX grammar, `require('./x')` imports)
+  - [ ] Python, Java, C#, Go, C/C++ (needs `cargo add tree-sitter-python tree-sitter-java tree-sitter-c-sharp tree-sitter-go tree-sitter-c tree-sitter-cpp`, run by the user)
 - [ ] Phase 5 (A.5) Precision: SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
 - [ ] Phase 6 (A.6) Claude Code integration: MCP server, skill, hook; replace codemap.sh/callers.sh only if benchmarks win
 - [ ] Phase 7 (A.7) Documents: semantic pass over docs/PDFs/markdown via a skill
