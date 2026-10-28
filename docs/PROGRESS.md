@@ -27,6 +27,23 @@ Next step: stop for the user OK, then Phase 5 (A.5): import SCIP from rust-analy
 ## Graphify parity checklist
 Compared on 2026-10-28 against Graphify 0.9.97 (source: see CLAUDE.md). `G/` = graphify package dir. Mark: [x] done, [~] partial, [ ] todo. Update when a feature lands.
 
+### Parity score (2026-10-30; item = 1, partial = 0.5; Graphify 0.9.97 `--help`, `exporters/`, `extractors/`, `extract.py`)
+| Area | Done / total | % |
+|---|---|---|
+| Commands (install, path, explain, diagnose, clone, merge-driver, merge-graphs, add, watch, update, cluster-only, label, query, affected, god-nodes, prs, save-result, reflect, check-update, tree, extract, provider, global, benchmark, hook, serve) | 8 / 26 (done: path, explain, watch, update, cluster-only, affected, god-nodes; partial: extract = AST only, benchmark) | 31% |
+| Exports (json, html, obsidian, canvas, graphml, svg, cypher/falkordb, wiki, callflow html, tree html) | 3 / 10 (json, html; partial: obsidian, callflow) | 30% |
+| Analysis (communities, god nodes, surprising links, cohesion, suggested questions, dedup, resolution passes, incremental cache, rcfile, query log, security caps, validate) | 5 / 12 | 42% |
+| Web view features | 11 / 16 | 69% |
+| Languages (Graphify has ~45 extractors) | 9 / 45 (Rust, TS/TSX, JS, Python, Java, C#, Go, C, C++) | 20% |
+| Ingest / semantic (docs, PDF, images, audio, Google, Postgres, manifest, URL, LLM pass) | 0 / 9 | 0% |
+| **Total** | **36 / 118** | **~31%** |
+
+### Provenance: did we read Graphify's code first?
+- Followed its source: communities (`cluster.py`: Louvain idea, cohesion, both split rules), report (`report.py`: surprising links), web view features (`exporters/html.py`).
+- Only the idea, not the detail: languages (`LanguageConfig` table idea; node-type tables written by us; `engine.py`/resolution passes not read).
+- NOT read before building (rule broken): `mermaid` and `obsidian`. Graphify's real versions differ a lot (comparison on 2026-10-30): `callflow_html.py` draws a whole-graph, community-level overview plus one capped chart per community (18 nodes / 24 edges, file subgraphs, kind classes, edge ranking, `%% Omitted` note, HTML with pan/zoom, Mermaid from a CDN); `to_obsidian` writes one note per NODE named by label (dedup `_N`), frontmatter `source_file/type/community(name)/location/tags`, `## Connections` with `[[Target]] - \`relation\` [CONFIDENCE]`, `_COMMUNITY_<label>.md` notes with cohesion, members, bridge nodes, cross-community links, `.obsidian/graph.json` colours, a manifest that never clobbers user notes and prunes stale ones; `to_canvas` writes a `.canvas` (community groups in a grid, file cards, top 200 edges). Ours: one function's callees; one note per file. These two are ours, not ported.
+- Ours only (no Graphify equivalent): offline 3D view, SCIP import (Graphify's `scip_ingest.py` is a skeleton), per-definition hubs, coverage report, broken-pipe hook.
+
 Web view (`G/exporters/html.py`; Graphify's is 2D vis-network 9.1.6 from a CDN, NOT 3D, NOT offline):
 - [x] interactive graph page: ours = offline plain-canvas page with own 3D force layout (`src/html.rs` + parts in `src/html/`); Graphify uses vis-network from a CDN
 - [x] search box, click-to-inspect side panel with neighbours
@@ -56,7 +73,7 @@ Commands:
 - [ ] merge-graphs, global graph, merge-driver, clone, prs, save-result, reflect -> Part B
 
 Analysis:
-- [~] communities: Louvain only (Graphify: Leiden + Louvain fallback, oversized-community split skipped), file-level
+- [~] communities: Louvain + both split rules (Graphify: Leiden preferred, Louvain fallback), file-level
 - [x] god nodes, surprising links; [ ] suggested questions, dedup (`dedup.py`, MinHash)
 - [~] languages: Rust, TS/TSX, JS, Python, Java, C#, Go, C/C++ of ~30 (`G/extractors/`); others (Ruby, PHP, Kotlin, Swift, ...) on request
 - [ ] resolution passes (symbol/interface/cross-repo, `extractors/resolution.py`), SCIP ingest (`scip_ingest.py`) -> Phase 5
@@ -118,3 +135,4 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
 - 2026-10-30 Phase 5 real-world numbers (release): codegraph itself, rust-analyzer 1.99.1 `scip` 3.4 s, import resolved 3957 of 4256 calls (3111 external), `callers new` 65 -> 5 hits, `new` gone from the top hubs; pizzeria (scip-typescript, no node_modules), index 0.7 MB, import 4 ms, 438 of 824 calls resolved (290 external), `callers formatPrice` stays 12 sites / 6 files (exact), 9 index documents match no indexed file (not our languages/skipped)
 - 2026-10-30 Phase 5 tokio (release): `rust-analyzer scip` 28 s, index 21.8 MB, `codegraph scip` import 63 ms, 43868 of 53600 calls resolved (22630 external); `callers notify_waiters` 33 hits (same count, now each shows `-> path:line`; one is a bench-local fn of the same name); communities 91 -> 42 but the biggest went 179 -> 188 files (cohesion 0.03): resolved calls add real links, so the giant cluster is Louvain's resolution limit, not name noise. `hubs`: `new` still tops (1374 -> 1123 in-calls) because node identity is still the bare name; `drop` fell out of the top 5. Next fix for the giant community: Graphify's oversized-community split (skipped in Phase 2 until a real repo showed one; this is that repo)
 - 2026-10-30 Phase 5 follow-up (tokio, release, after the fixes): (1) `last_name` now reads backticks inside `[..]`/`(..)` descriptors (``slice/impl#[`[T]`]len().``): resolved 43,868 -> 44,396 of 53,600; (2) `codegraph scip` reports files the index does not cover (tokio: 101 files, 4,493 calls behind cfg flags such as loom/tokio_uring; they keep name matching) and clears old answers of files a re-run no longer covers; (3) Broken pipe: a panic hook exits 0 quietly (`codegraph callers x | head`); (4) communities: ported Graphify's two split rules (group > max(10, n/4) files, or >= 50 files with cohesion < 0.05, re-clustered with Louvain on its own links): tokio 42 -> 74 communities, biggest 188 -> 51 files; (5) `hubs` are per definition once SCIP data exists and a name has >= 2 definitions (unresolved calls to such names are skipped as unattributable); without SCIP data it is unchanged. tokio top hubs are now single definitions (`spawn` tokio-test in=287, `spawn` tokio/task in=224, `block_on` in=172) instead of one merged `new`. `explain`/`affected`/`path` are still name-level. `callers notify_waiters` stays 33 by name: only 18 resolve to `Notify::notify_waiters` (notify.rs:740), 5 to a bench-local fn, 4 to other same-named fns, 6 are in `loom_notify.rs` (not indexed); the old "32 exact" target was a name-match count
+- 2026-10-30 scale check (release, copy of Go's stdlib in git-ignored `bench/real/gostd`, 8,167 files, 157 MB): cold index 1.09 s, cached index 254 ms, `def`/`callers` 81-83 ms, `hubs` 440 ms, peak memory 289 MB, graph.bin 27 MB, graph.json 56 MB, codemap.md 10 MB. Not tried: 50k+ files. User's goals (2026-10-30): faster, more accurate, OFFLINE, saves tokens, any project size; parity percentage is secondary. Token saving needs Claude Code to actually call the graph: Phase 6
