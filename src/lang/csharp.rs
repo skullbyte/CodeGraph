@@ -62,8 +62,14 @@ fn callee(node: Node, src: &str) -> Option<String> {
     if node.kind() == "object_creation_expression" {
         let ty = text(node.child_by_field_name("type")?, src);
         let ty = ty.split('<').next().unwrap_or(ty);
-        return Some(ty.rsplit('.').next().unwrap_or(ty).trim().to_string())
-            .filter(|t| !t.is_empty());
+        return Some(
+            ty.rsplit(['.', ':'])
+                .next()
+                .unwrap_or(ty)
+                .trim()
+                .to_string(),
+        )
+        .filter(|t| !t.is_empty());
     }
     let mut f = node.child_by_field_name("function")?;
     // `a?.F()`: the method is the last part, a `member_binding_expression`.
@@ -194,6 +200,17 @@ namespace Shop {
                 ("Conv", Some("Q")),
             ]
         );
+    }
+
+    #[test]
+    fn global_qualified_new_is_a_call_to_the_type() {
+        let facts = extract_file(
+            Lang::CSharp,
+            "class A { void M() { new global::Shop.Cart(); new global::Foo(); } }\n",
+        )
+        .unwrap();
+        let got: Vec<_> = facts.calls.iter().map(|c| c.callee.as_str()).collect();
+        assert_eq!(got, vec!["Cart", "Foo"]);
     }
 
     #[test]

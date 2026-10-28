@@ -16,7 +16,12 @@ const CONFIG: Config = Config {
         ("method_declaration", Kind::Fn),
         ("constructor_declaration", Kind::Fn),
     ],
-    calls: &["method_invocation", "object_creation_expression"],
+    calls: &[
+        "method_invocation",
+        "object_creation_expression",
+        "explicit_constructor_invocation",
+        "method_reference",
+    ],
     scopes: &[],
     name: name_field,
     callee,
@@ -27,16 +32,54 @@ pub fn extract(root: Node, src: &str) -> Facts {
     super::generic::extract(root, src, &CONFIG)
 }
 
-/// `f()` and `a.f()` -> f; `new Foo<T>()` and `new a.Foo()` -> Foo.
+/// `f()` and `a.f()` -> f; `new Foo<T>()` and `new a.Foo()` -> Foo; `this(..)` -> the class's own
+/// constructor, `super(..)` -> the superclass's; `A::f` -> f, `A::new` -> A.
 fn callee(node: Node, src: &str) -> Option<String> {
-    if node.kind() == "method_invocation" {
-        return node
+    match node.kind() {
+        "method_invocation" => node
             .child_by_field_name("name")
-            .and_then(|n| non_empty(n, src));
+            .and_then(|n| non_empty(n, src)),
+        "explicit_constructor_invocation" => {
+            let class = enclosing_class(node)?;
+            let target = match text(node.child_by_field_name("constructor")?, src) {
+                "this" => class.child_by_field_name("name")?,
+                _ => class.child_by_field_name("superclass")?.named_child(0)?,
+            };
+            type_name(text(target, src))
+        }
+        "method_reference" => {
+            let mut cursor = node.walk();
+            let last = node.named_children(&mut cursor).last()?;
+            if last.kind() == "identifier" {
+                non_empty(last, src)
+            } else {
+                // `Foo::new` builds a Foo; `int[]::new` builds an array, which is no project type.
+                let owner = node.named_child(0).filter(|o| o.kind() != "array_type")?;
+                type_name(text(owner, src))
+            }
+        }
+        _ => type_name(text(node.child_by_field_name("type")?, src)),
     }
-    let ty = text(node.child_by_field_name("type")?, src);
+}
+
+/// `a.b.Foo<T>` -> Foo.
+fn type_name(ty: &str) -> Option<String> {
     let ty = ty.split('<').next().unwrap_or(ty);
     Some(ty.rsplit('.').next().unwrap_or(ty).trim().to_string()).filter(|t| !t.is_empty())
+}
+
+fn enclosing_class(node: Node) -> Option<Node> {
+    let mut up = node.parent();
+    while let Some(n) = up {
+        if matches!(
+            n.kind(),
+            "class_declaration" | "enum_declaration" | "record_declaration"
+        ) {
+            return Some(n);
+        }
+        up = n.parent();
+    }
+    None
 }
 
 /// `import a.b.C;` -> `a.b.C`; a nested class or static member also gives its owner classes
@@ -123,6 +166,66 @@ public class Store {
                 "com.shop.Cart.Item",
                 "com.shop.Util",
                 "com.shop.Util.fmt",
+            ]
+        );
+    }
+
+    #[test]
+    fn this_super_and_method_references_are_calls() {
+        let facts = extract_file(
+            Lang::Java,
+            "class A extends B<T> {
+    A() { this(1); }
+    A(int x) { super(x); }
+    void m() { list.forEach(Util::show); Supplier<Foo> s = Foo::new; }
+}
+",
+        )
+        .unwrap();
+        let got: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.caller.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("A", Some("A")),
+                ("B", Some("A")),
+                ("forEach", Some("m")),
+                ("show", Some("m")),
+                ("Foo", Some("m")),
+            ]
+        );
+    }
+
+    #[test]
+    fn constructor_calls_in_odd_places() {
+        let facts = extract_file(
+            Lang::Java,
+            "class Plain { Plain() { super(); } }
+class Outer extends Base {
+    class Inner extends Other { Inner() { super(); } }
+    Outer() { outer.super(1); }
+}
+enum E { A; E() { this(1); } E(int x) {} }
+record R(int a) { R { this(a, 0); } R(int a, int b) { this(a); } }
+class Arr { void m() { Function<Integer, int[]> f = int[]::new; } }
+",
+        )
+        .unwrap();
+        let got: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.caller.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Other", Some("Inner")),
+                ("Base", Some("Outer")),
+                ("E", Some("E")),
+                ("R", Some("R")),
             ]
         );
     }
