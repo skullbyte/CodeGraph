@@ -84,7 +84,17 @@ let fitDirty = true;    // the layout radius must be measured again
 let css = {};
 let dpr = 1;
 let dirty = true;       // the graph canvas must be repainted
-const calm = !!matchMedia('(prefers-reduced-motion: reduce)').matches; // no spin, intro, glide, ripple or drifting stars
+// Watch a media query. Old browsers (Safari < 14) only have addListener, and some have neither: never throw.
+// Returns a function that stops watching.
+function onMedia(query, fn) {
+  try {
+    const q = matchMedia(query);
+    if (q.addEventListener) { q.addEventListener('change', fn); return () => q.removeEventListener('change', fn); }
+    if (q.addListener) { q.addListener(fn); return () => q.removeListener(fn); }
+  } catch (e) { /* no matchMedia: nothing to watch */ }
+  return () => {};
+}
+let calm = (() => { try { return !!matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; } })(); // no spin, intro, glide, ripple or drifting stars
 let drawCount = 0, slowStreak = 0, glideId = 0;
 let lowQuality = false; // switched on automatically when frames get slow
 let frameMs = 0;        // smoothed draw time

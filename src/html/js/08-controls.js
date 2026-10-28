@@ -76,6 +76,15 @@ let spinWanted = !calm; // the user's own choice, restored when coming back to 3
 setSpin(spinWanted);
 if (calm) { spin.disabled = true; spin.closest('label').classList.add('off'); } // reduced motion: nothing rotates, so the switch is inert
 let lastInteract = -Infinity, resumeTimer = 0;
+// The reduced-motion setting can change while the page is open.
+onMedia('(prefers-reduced-motion: reduce)', () => {
+  try { calm = !!matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return; }
+  spinWanted = !calm;
+  spin.disabled = calm || !mode3d;
+  spin.closest('label').classList.toggle('off', calm || !mode3d);
+  setSpin(mode3d && spinWanted);
+  scheduleResume(); invalidate(); start();
+});
 const spinOk = () => mode3d && spin.checked && !calm;
 const pressed = () => !!drag || touches.size > 0;
 function scheduleResume() { // wake the loop once the pause is over; costs nothing in between
@@ -95,8 +104,11 @@ function setMode(three) {
   mode3d = three;
   document.getElementById('m3d').setAttribute('aria-pressed', String(three));
   document.getElementById('mflat').setAttribute('aria-pressed', String(!three));
-  spin.disabled = !three;
-  spin.parentElement.classList.toggle('off', !three);
+  spin.disabled = calm || !three;
+  spin.parentElement.classList.toggle('off', calm || !three);
+  document.getElementById('hintDrag').textContent = three ? 'rotate' : 'pan';
+  document.getElementById('hintPan').hidden = !three;
+  if (selected < 0) { const panel = document.getElementById('panel'); panel.replaceChildren(); welcome(panel); } // refresh the controls help for the new mode (no slide-in replay)
   // Give the flat layout depth again with a deterministic nudge, then let it relax.
   if (mode3d) nodes.forEach(n => { n.z += ((n.i * 7919) % 100 - 50) * 0.2; });
   setSpin(mode3d && spinWanted);
@@ -116,11 +128,19 @@ document.getElementById('reset').onclick = () => { // back to the fitted view (k
 };
 
 const search = document.getElementById('search');
-search.oninput = () => { filters.text = search.value.trim().toLowerCase(); filtersChanged(); };
+let lastEnterQuery = null; // a new query starts again at its first match
+search.oninput = () => { filters.text = search.value.trim().toLowerCase(); lastEnterQuery = null; filtersChanged(); };
 search.onkeydown = e => {
-  if (e.key !== 'Enter') return;
-  const hit = nodes.find(n => n.vis && n.m);
-  if (hit) { select(hit.i); center(hit.i); }
+  if (e.key !== 'Enter' || e.isComposing) return; // Enter that confirms an input-method candidate is not a search
+  e.preventDefault();
+  if (!filters.text) return;
+  const hits = nodes.filter(n => n.vis && n.m); // Enter: next match, Shift+Enter: previous
+  if (!hits.length) return;
+  const fresh = filters.text !== lastEnterQuery, step = e.shiftKey ? -1 : 1;
+  lastEnterQuery = filters.text;
+  const at = fresh ? -1 : hits.findIndex(n => n.i === selected);
+  const hit = hits[at < 0 ? (step > 0 ? 0 : hits.length - 1) : (at + step + hits.length) % hits.length];
+  select(hit.i); center(hit.i);
 };
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && selected >= 0 && document.activeElement !== search) select(-1);

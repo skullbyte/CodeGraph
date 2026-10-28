@@ -14,19 +14,23 @@ function makeDropdown(host, { id, label, iconName, allLabel, options, onChange }
     el.className = 'ddopt'; el.id = `${id}-o${k}`; el.setAttribute('role', 'option'); el.setAttribute('aria-selected', 'false');
     el.append(icon('check'), text('span', o.label, 'txt'), text('span', String(o.count), 'num'));
     el.firstChild.setAttribute('class', 'ic tick');
-    el.onmousemove = () => mark(k);
+    el.onmousemove = () => mark(k, false);
     el.onclick = () => { choose(k); closeMenu(true); };
     menu.append(el);
     if (k === 0 && all.length > 1) menu.append(Object.assign(document.createElement('div'), { className: 'ddsep' }));
     return el;
   });
+  menu.querySelectorAll('.ddsep').forEach(s => s.setAttribute('aria-hidden', 'true')); // a listbox holds options only
   let value = '', cur = 0, isOpen = false, typed = '', typedAt = 0;
   const indexOf = v => Math.max(0, all.findIndex(o => o.value === v));
-  function mark(k) {
+  function mark(k, scroll = true) {
     cur = clamp(k, 0, all.length - 1);
     els.forEach((el, j) => el.classList.toggle('cur', j === cur));
     menu.setAttribute('aria-activedescendant', els[cur].id);
-    els[cur].scrollIntoView({ block: 'nearest' });
+    if (!scroll) return; // hovering must not move the list under the pointer
+    const el = els[cur]; // scroll only the menu itself, never the page
+    if (el.offsetTop < menu.scrollTop) menu.scrollTop = el.offsetTop;
+    else if (el.offsetTop + el.offsetHeight > menu.scrollTop + menu.clientHeight) menu.scrollTop = el.offsetTop + el.offsetHeight - menu.clientHeight;
   }
   function setValue(v) {
     value = v;
@@ -46,12 +50,15 @@ function makeDropdown(host, { id, label, iconName, allLabel, options, onChange }
     if (isOpen) return;
     dropdowns.forEach(d => d.close());
     isOpen = true; menu.hidden = false; btn.setAttribute('aria-expanded', 'true');
+    menu.style.left = ''; menu.style.right = '';
+    if (menu.getBoundingClientRect().right > document.documentElement.clientWidth - 4) { menu.style.left = 'auto'; menu.style.right = '0'; } // keep it on screen
     mark(indexOf(value));
     menu.focus({ preventScroll: true });
   }
   function closeMenu(refocus) {
+    typed = ''; // a reopened menu starts a fresh type-ahead
     if (!isOpen) return;
-    isOpen = false; menu.hidden = true; btn.setAttribute('aria-expanded', 'false');
+    isOpen = false; menu.hidden = true; menu.style.left = ''; menu.style.right = ''; btn.setAttribute('aria-expanded', 'false');
     if (refocus) btn.focus();
   }
   btn.onclick = () => (isOpen ? closeMenu(true) : openMenu());
@@ -62,17 +69,16 @@ function makeDropdown(host, { id, label, iconName, allLabel, options, onChange }
     else if (key === 'ArrowUp') mark(cur - 1);
     else if (key === 'Home') mark(0);
     else if (key === 'End') mark(all.length - 1);
-    else if (key === 'Enter' || key === ' ') { choose(cur); closeMenu(true); }
+    else if (key === 'Enter' || (key === ' ' && !(typed && performance.now() - typedAt <= 700))) { choose(cur); closeMenu(true); }
     else if (key === 'Escape') closeMenu(true);
     else if (key === 'Tab') { closeMenu(false); return; }
     else if (key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) { // type-ahead: jump to the next label starting with what was typed
       const now = performance.now();
       typed = now - typedAt > 700 ? key.toLowerCase() : typed + key.toLowerCase(); typedAt = now;
-      const from = typed.length === 1 ? cur + 1 : cur;
-      for (let s = 0; s < all.length; s++) {
-        const k = (from + s) % all.length;
-        if (all[k].label.toLowerCase().startsWith(typed)) { mark(k); break; }
-      }
+      const find = (needle, from) => { for (let s = 0; s < all.length; s++) { const k = (from + s) % all.length; if (all[k].label.toLowerCase().startsWith(needle)) return k; } return -1; };
+      let k = find(typed, typed.length === 1 ? cur + 1 : cur); // one letter: the next label that starts with it
+      if (k < 0 && [...typed].every(c => c === typed[0])) k = find(typed[0], cur + 1); // "ff" with no label starting "ff": cycle on "f"
+      if (k >= 0) mark(k);
     } else return;
     e.preventDefault(); e.stopPropagation(); // keep Esc and `/` from reaching the page shortcuts while the list is open
   };

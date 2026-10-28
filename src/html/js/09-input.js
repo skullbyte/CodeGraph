@@ -3,11 +3,12 @@
 let drag = null, pinch = null, tipTimer = 0;
 const touches = new Map();
 const tip = document.getElementById('tip');
-const hideTip = () => { clearTimeout(tipTimer); tip.classList.remove('show'); };
+const hideTip = () => { clearTimeout(tipTimer); tip.classList.remove('show'); tip.setAttribute('aria-hidden', 'true'); };
 function showTip(i, cx, cy) {
   const n = nodes[i];
   tip.replaceChildren(text('b', n.path), text('span', `${plural(n.symbols.length, 'symbol')}, ${plural(n.deg, 'link')}, community ${n.community}`));
   tip.classList.add('show');
+  tip.removeAttribute('aria-hidden');
   const w = tip.offsetWidth, h = tip.offsetHeight;
   const x = cx + 14 + w > window.innerWidth - 8 ? cx - 14 - w : cx + 14;
   const y = Math.min(cy + 14, window.innerHeight - h - 8);
@@ -48,7 +49,10 @@ canvas.onpointermove = e => {
     const box = canvas.getBoundingClientRect(), i = pick(e.clientX - box.left, e.clientY - box.top);
     canvas.style.cursor = i >= 0 ? 'pointer' : 'grab';
     hideTip();
-    if (i >= 0 && e.pointerType === 'mouse') tipTimer = setTimeout(() => showTip(i, e.clientX, e.clientY), 120);
+    if (i >= 0 && e.pointerType === 'mouse') tipTimer = setTimeout(() => { // look again: the ball under the pointer may have moved
+      const b = canvas.getBoundingClientRect(), j = pick(e.clientX - b.left, e.clientY - b.top);
+      if (j >= 0) showTip(j, e.clientX, e.clientY);
+    }, 120);
     return;
   }
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
@@ -77,6 +81,7 @@ canvas.onpointerup = e => {
 };
 canvas.onwheel = e => {
   e.preventDefault();
+  hideTip();
   cancelGlide();
   userMoved = true;
   const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1); // lines or pages to pixels
@@ -92,6 +97,12 @@ function onResize() {
 }
 if (window.ResizeObserver) new ResizeObserver(onResize).observe(document.getElementById('view'));
 else window.onresize = onResize;
-matchMedia('(prefers-color-scheme: dark)').onchange = refreshColors;
+// A new device-pixel ratio (window moved to another screen, browser zoom) does not resize the view, so it needs its
+// own watch. The query names the current ratio and fires once when it changes; then we watch the new ratio.
+function watchPixelRatio() {
+  const off = onMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`, () => { off(); onResize(); watchPixelRatio(); });
+}
+watchPixelRatio();
+onMedia('(prefers-color-scheme: dark)', () => { if (theme === 'system') refreshColors(); }); // an explicit light/dark choice ignores the system
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { lastFrame = 0; start(); } });
 

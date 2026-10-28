@@ -43,18 +43,19 @@
     <canvas id="canvas" role="img" aria-label="Graph of the project's files and the links between them. Use the search box and Enter to open a file."></canvas>
     <div id="status" aria-live="polite"></div>
     <div id="hints" aria-hidden="true">
-      <span class="chip"><kbd>Drag</kbd> rotate</span>
+      <span class="chip"><kbd>Drag</kbd> <span id="hintDrag">rotate</span></span>
       <span class="chip"><kbd>Scroll</kbd> zoom</span>
-      <span class="chip"><kbd>Shift</kbd> drag to pan</span>
+      <span id="hintPan" class="chip"><kbd>Shift</kbd> drag to pan</span>
     </div>
-    <div id="empty" aria-live="polite" hidden></div>
+    <div id="empty" hidden></div>
+    <div id="announce" class="vh" role="status" aria-live="polite"></div>
   </div>
   <aside id="side">
     <div id="panel"></div>
     <div id="legend"></div>
   </aside>
 </main>
-<div id="tip" role="tooltip"></div>
+<div id="tip" role="tooltip" aria-hidden="true"></div>
 <script>
 /*SCRIPT*/</script>
 </body>

@@ -78,17 +78,22 @@ function draw() {
   showEmpty(shown.length, foundCount);
 }
 
+// Screen-reader status: a hidden element that is always rendered, so changes get announced.
+const announce = msg => { document.getElementById('announce').textContent = msg; };
+
 // Friendly message over the canvas when there is nothing to draw.
 function showEmpty(shownCount, found) {
   const box = document.getElementById('empty');
   const key = !nodes.length ? 'none' : !shownCount ? 'filtered' : !found ? 'search:' + filters.text : '';
   if (key === emptyKey) return;
+  const prevKind = emptyKey.split(':')[0]; // typing more letters inside an empty search must not re-announce
   emptyKey = key;
   box.replaceChildren();
   box.hidden = !key;
-  if (!key) return;
+  if (!key) { announce(''); return; }
   if (key === 'none') {
     box.append(text('h2', 'No files to show'), text('p', 'Run codegraph index in your project, then codegraph html again.'));
+    announce('No files to show');
     return;
   }
   const searching = key !== 'filtered';
@@ -99,9 +104,10 @@ function showEmpty(shownCount, found) {
   const btn = text('button', searching ? 'Clear search' : 'Show all files', 'btn');
   btn.type = 'button';
   btn.onclick = () => {
-    if (searching) { search.value = ''; filters.text = ''; filtersChanged(); } else { resetFilters(); invalidate(); }
+    if (searching) { search.value = ''; filters.text = ''; filtersChanged(); search.focus(); } else { resetFilters(); invalidate(); document.getElementById('folder').focus(); }
   };
   box.append(btn);
+  if (prevKind !== 'search') announce(searching ? `No matches for "${filters.text}"` : 'Everything is filtered out');
 }
 
 function pick(px, py) {
@@ -150,7 +156,7 @@ function welcome(panel) {
   panel.append(text('h3', 'Controls'));
   const tips = document.createElement('dl');
   tips.className = 'tips group';
-  for (const [key, what] of [['Click', 'Open a file to see its functions and links'], ['Drag', 'Rotate the 3D view'], ['Shift + drag', 'Move around (or right-drag)'], ['Scroll', 'Zoom in and out (pinch on touch)'], ['/', 'Focus the search box'], ['Enter', 'In search, jump to the first match'], ['Esc', 'Close the selected file']]) {
+  for (const [key, what] of [['Click', 'Open a file to see its functions and links'], ...(mode3d ? [['Drag', 'Rotate the 3D view'], ['Shift + drag', 'Move around (or right-drag)']] : [['Drag', 'Move around the flat view']]), ['Scroll', 'Zoom in and out (pinch on touch)'], ['/', 'Focus the search box'], ['Enter', 'In search, jump to the next match (Shift + Enter: previous)'], ['Esc', 'Close the selected file']]) {
     const dt = document.createElement('dt');
     dt.append(text('kbd', key));
     tips.append(dt, text('dd', what));
@@ -190,13 +196,18 @@ function linkList(i, title, keep, arrowName) {
 let panelFor = -2; // which selection the side panel currently shows (-2: nothing built yet)
 function select(i) {
   if (i === panelFor) { invalidate(); return; } // same selection: leave the panel alone (no rebuild, no slide-in)
+  const prevPanel = panelFor;
   panelFor = i;
   selected = i;
   near = new Set(i >= 0 ? links[i].map(l => l.j) : []);
   const panel = document.getElementById('panel');
+  const hadFocus = panel.contains(document.activeElement); // the rebuild deletes the focused button
+  const first = prevPanel === -2;
+  panel.tabIndex = -1;
   panel.replaceChildren();
   panel.scrollTop = 0;
-  if (i < 0) { ping = null; welcome(panel); slideIn(panel); invalidate(); return; }
+  if (!first) announce(i < 0 ? 'Selection closed' : `Selected ${nodes[i].path}`);
+  if (i < 0) { ping = null; welcome(panel); slideIn(panel); invalidate(); if (hadFocus) panel.focus({ preventScroll: true }); return; }
   const n = nodes[i], parts = n.path.split('/');
   const top = document.createElement('div'), crumbs = document.createElement('div');
   top.className = 'top'; crumbs.className = 'crumbs';
@@ -229,6 +240,7 @@ function select(i) {
   if (!n.symbols.length) syms.append(text('li', 'No symbols found in this file', 'none'));
   panel.append(sec('Symbols', n.symbols.length), syms, ...linkList(i, 'Uses', l => l.out, 'arrowR'), ...linkList(i, 'Used by', l => l.inn, 'arrowL'));
   slideIn(panel);
+  if (hadFocus) close.focus({ preventScroll: true });
   if (!calm) { ping = { i, t0: performance.now() }; rippleLoop(); }
   invalidate();
 }
