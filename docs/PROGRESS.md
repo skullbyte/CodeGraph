@@ -1,9 +1,9 @@
 # codegraph progress
 
 ## Now
-Goal: Part A phase 2 (Analysis: community detection + GRAPH_REPORT.md + `codegraph benchmark` vs Graphify).
+Goal: Part A phase 3 (Visuals): `codegraph html` done (offline 3D space view, reviewed); next `mermaid`, then `obsidian`.
 State: Phase 1 is DONE and committed (8674776, 652302a). Phase 2 is DONE, reviewed and committed (src/community.rs, report.rs, benchmark.rs; CLI `report`, `benchmark`). `just check` green: 76 unit + 13 end-to-end tests.
-Next step: first check the "To check" list in Gotchas, then (after the user's OK) plan Phase 3 (visuals: `codegraph html`, Mermaid, Obsidian) in plan mode.
+Next step: commit the html work (add files by name, never `git add -A`), then step 2 `codegraph mermaid` and step 3 `codegraph obsidian` per the approved plan (~/.claude/plans/floating-munching-lantern.md).
 
 ## Checklist
 - [x] Phase 1 (Part A.1) core engine, reviewed and committed
@@ -14,7 +14,10 @@ Next step: first check the "To check" list in Gotchas, then (after the user's OK
   - [x] tsconfig `paths` aliases, project lock, atomic writes, binary cache, README (credits Graphify), Apache-2.0 LICENSE
   - [x] benchmarks on tokio + pizzeria (see Gotchas for numbers)
 - [x] Phase 2 (A.2) Analysis: file-level Louvain communities, `codegraph report` -> .claude/GRAPH_REPORT.md, `codegraph benchmark` vs Graphify (reviewed, committed)
-- [ ] Phase 3 (A.3) Visuals: `codegraph html`, Mermaid callflow export, Obsidian vault export
+- [ ] Phase 3 (A.3) Visuals
+  - [x] `codegraph html` (offline page; 2D committed eb91796; space-themed 3D view with Graphify web features done and reviewed, not committed yet)
+  - [ ] Mermaid callflow export
+  - [ ] Obsidian vault export
 - [ ] Phase 4 (A.4) More languages: Python, Java, C#, Go, JavaScript, C/C++
 - [ ] Phase 5 (A.5) Precision: SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
 - [ ] Phase 6 (A.6) Claude Code integration: MCP server, skill, hook; replace codemap.sh/callers.sh only if benchmarks win
@@ -22,7 +25,51 @@ Next step: first check the "To check" list in Gotchas, then (after the user's OK
 - [ ] Part B: full Graphify parity (order chosen by the user later)
 - [ ] Open: update on tokio is ~19-21 ms (target < 20 ms); `docs/REQUIREMENTS.md` Part A/B is the source of truth for scope
 
+## Graphify parity checklist
+Compared on 2026-10-28 against Graphify 0.9.97 (source: see CLAUDE.md). `G/` = graphify package dir. Mark: [x] done, [~] partial, [ ] todo. Update when a feature lands.
+
+Web view (`G/exporters/html.py`; Graphify's is 2D vis-network 9.1.6 from a CDN, NOT 3D, NOT offline):
+- [x] interactive graph page: ours = offline plain-canvas page with own 3D force layout (`src/html.rs`, `src/html/template.html`); Graphify uses vis-network from a CDN
+- [x] search box, click-to-inspect side panel with neighbours
+- [x] community colouring; [x] community legend with per-community checkboxes + All/None
+- [x] node size by degree; [x] labels only on hubs (degree >= 30% of max, Graphify 15%; also selected and search hits)
+- [x] hover tooltip, system/light/dark theme toggle (saved in localStorage), stats (header status: files, links, communities)
+- [x] arrows on edges (direction = imports/calls); [ ] dashed edges for non-EXTRACTED confidence (needs Phase 5 confidence data)
+- [ ] aggregated community-level view above 5000 nodes (`MAX_NODES_FOR_VIZ`, `GRAPHIFY_VIZ_NODE_LIMIT`), `--node-limit`, `--no-viz`
+- [ ] hyperedges as convex-hull regions; learning overlay (green/amber/stale rings; needs `reflect`)
+- [x] extra, not in Graphify: folder/kind/community filters
+- [x] extra, not in Graphify: offline 3D view (perspective, depth shading, drag to rotate, spin, 2D/3D toggle)
+
+Exports (`G/export.py`, `G/exporters/`):
+- [x] graph.json (ours also graph.bin)
+- [x] GRAPH_REPORT.md (`report.py`)
+- [ ] callflow-html (`callflow_html.py`: Mermaid page with pan/zoom; Mermaid from a CDN) -> ours: `codegraph mermaid`, Phase 3 step 2
+- [ ] obsidian vault + canvas (`to_obsidian`, `to_canvas`) -> Phase 3 step 3
+- [ ] tree (`tree_html.py`, D3 collapsible tree), wiki, svg, graphml, neo4j, falkordb -> Part B
+
+Commands:
+- [x] path, explain, affected, god-nodes (= our `hubs`), watch, update, benchmark (~: index time + explain tokens only)
+- [x] cluster-only (= our `report`); [ ] label (LLM-named communities)
+- [ ] query "<question>" (BFS/DFS with --depth/--budget)
+- [ ] diagnose multigraph, check-update, cache-check
+- [ ] hook install/uninstall/status (git hooks), install/uninstall per AI platform, serve (graph server/MCP) -> Phase 6
+- [ ] extract (AST + LLM), provider, add <url>, transcribe (audio/video), manifest/mcp/pg ingest -> Phase 7 / Part B
+- [ ] merge-graphs, global graph, merge-driver, clone, prs, save-result, reflect -> Part B
+
+Analysis:
+- [~] communities: Louvain only (Graphify: Leiden + Louvain fallback, oversized-community split skipped), file-level
+- [x] god nodes, surprising links; [ ] suggested questions, dedup (`dedup.py`, MinHash)
+- [~] languages: Rust + TS/TSX of ~30 (`G/extractors/`) -> Phase 4
+- [ ] resolution passes (symbol/interface/cross-repo, `extractors/resolution.py`), SCIP ingest (`scip_ingest.py`) -> Phase 5
+- [ ] project config `.graphifyrc`, query log, security caps (URL/SSRF, size limits) -> Part B
+
+Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graphify ships no JS. If we port its code or embed vis-network/d3/mermaid, keep those notices and check each library's licence first.
+
 ## Decisions
+- 2026-10-28 the page source is split into `src/html/style.css`, `src/html/js/01..10-*.js` and a skeleton `template.html`, joined by `assemble()` in `src/html.rs`; output proved byte-identical to the single file. Reason: agents re-read the whole 1700-line file every step (~200k tokens per pass). User rule: one `code-reviewer` run per finished feature
+- 2026-10-28 page design: done by agents on Sonnet (user rule: no Opus), using the pizzeria skills (frontend-design, apple-design, animate, visual-qa) plus ui-ux-pro-max, taste-skill and impeccable (installed without hook, telemetry off, gitignored). The page must stay offline, single-file, image-free; the template line `const DATA = /*DATA*/;` and `{{TITLE}}` are fixed by Rust tests; the SVG namespace is built from two strings to keep the no-`http://` test
+- 2026-10-28 Graphify's web view is 2D (vis-network via CDN), so "port the 3D web" was a wrong assumption; ours stays offline. User chose: match Graphify's web features, plus our own offline 3D (plain canvas, no libraries)
+- 2026-10-28 user rule: test pages in Brave (Flatpak com.brave.Browser); my browser tools only drive Chrome, so verify there and say so
 - 2026-10-27 walk the tree-sitter syntax tree by hand, no query API: queries need the extra `streaming-iterator` crate
 - 2026-10-27 `calls` are matched by name only (no types): exact resolution is Phase 5 (SCIP), so don't re-litigate it earlier
 - 2026-10-27 re-parse the body of `cfg_*!` macros as Rust and token-scan other macro arguments: tokio hides items and calls in macros

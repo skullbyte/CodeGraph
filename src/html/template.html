@@ -3,288 +3,59 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="darkreader-lock"><!-- the page has its own dark theme; stops the Dark Reader extension from repainting it -->
 <title>{{TITLE}} - codegraph</title>
 <style>
-:root { --bg:#fff; --fg:#1b1f24; --muted:#5b6570; --panel:#f4f6f8; --line:#c9d1d9; --edge:rgba(120,130,140,.35); }
-@media (prefers-color-scheme: dark) {
-  :root { --bg:#14181d; --fg:#e6edf3; --muted:#9aa5b1; --panel:#1d232a; --line:#34404c; --edge:rgba(150,160,170,.3); }
-}
-* { box-sizing: border-box; }
-body { margin:0; height:100vh; display:flex; flex-direction:column; background:var(--bg); color:var(--fg); font:14px system-ui, sans-serif; }
-header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line); }
-header h1 { font-size:15px; margin:0 8px 0 0; }
-input, select { font:inherit; color:var(--fg); background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:4px 6px; }
-#status { color:var(--muted); margin-left:auto; }
-main { flex:1; display:flex; min-height:0; }
-#view { flex:1; min-width:0; position:relative; }
-canvas { width:100%; height:100%; display:block; cursor:grab; }
-aside { width:300px; overflow:auto; padding:12px; background:var(--panel); border-left:1px solid var(--line); }
-aside h2 { font-size:14px; margin:0 0 4px; word-break:break-all; }
-aside h3 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:14px 0 4px; }
-aside ul { list-style:none; margin:0; padding:0; }
-aside li { padding:2px 0; word-break:break-all; }
-a.file { color:inherit; text-decoration:underline; cursor:pointer; }
-.muted { color:var(--muted); }
-@media (max-width: 700px) { main { flex-direction:column; } aside { width:auto; max-height:40%; border-left:0; border-top:1px solid var(--line); } }
-</style>
+/*STYLE*/</style>
 </head>
 <body>
 <header>
-  <h1>{{TITLE}}</h1>
-  <input id="search" type="search" placeholder="Search file or symbol" aria-label="Search file or symbol">
-  <select id="folder" aria-label="Filter by folder"></select>
-  <select id="kind" aria-label="Filter by kind"></select>
-  <select id="community" aria-label="Filter by community"></select>
-  <span id="status"></span>
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 28 28" aria-hidden="true"><rect class="tile" x=".5" y=".5" width="27" height="27" rx="8"/><path class="ln" d="M9 18.5 14 9.5l5.5 8.5M9 18.5h10.5"/><circle class="nd" cx="9" cy="18.5" r="2.4"/><circle class="nd" cx="14" cy="9.5" r="2.4"/><circle class="nd" cx="19.5" cy="18" r="2.4"/></svg>
+    <div class="name"><h1>{{TITLE}}</h1><span class="sub">codegraph</span></div>
+  </div>
+  <div class="controls">
+    <div class="field search">
+      <span data-icon="search"></span>
+      <input id="search" type="search" placeholder="Search files or functions" aria-label="Search files or functions" aria-keyshortcuts="/" autocomplete="off" spellcheck="false">
+      <kbd>/</kbd>
+    </div>
+    <div class="field" id="folderHost"></div>
+    <div class="field" id="kindHost"></div>
+    <div class="seg" role="group" aria-label="View">
+      <button id="m3d" type="button" aria-pressed="true" title="3D view" aria-label="3D view" data-icon="layers">3D</button>
+      <button id="mflat" type="button" aria-pressed="false" title="Flat view" aria-label="Flat view" data-icon="square">Flat</button>
+    </div>
+    <label class="spin" title="Slowly rotate the 3D view (pauses while you interact, resumes after 3 seconds)"><input id="spin" class="switch" type="checkbox" checked aria-label="Auto-rotate the 3D view"> Spin</label>
+  </div>
+  <div class="tools">
+    <button id="reset" class="ibtn" type="button" title="Reset view (fit the whole graph)" aria-label="Reset view" data-icon="reset"></button>
+    <div class="seg icons" role="group" aria-label="Colour theme">
+      <button type="button" data-theme-val="system" title="System theme" aria-label="System theme" aria-pressed="true" data-icon="monitor"></button>
+      <button type="button" data-theme-val="light" title="Light theme" aria-label="Light theme" aria-pressed="false" data-icon="sun"></button>
+      <button type="button" data-theme-val="dark" title="Dark theme" aria-label="Dark theme" aria-pressed="false" data-icon="moon"></button>
+    </div>
+  </div>
 </header>
 <main>
-  <div id="view"><canvas id="canvas"></canvas></div>
-  <aside id="panel"><p class="muted">Click a file to see its symbols and links. Scroll to zoom, drag to pan.</p></aside>
+  <div id="view">
+    <canvas id="bg" aria-hidden="true"></canvas>
+    <canvas id="canvas" role="img" aria-label="Graph of the project's files and the links between them. Use the search box and Enter to open a file."></canvas>
+    <div id="status" aria-live="polite"></div>
+    <div id="hints" aria-hidden="true">
+      <span class="chip"><kbd>Drag</kbd> rotate</span>
+      <span class="chip"><kbd>Scroll</kbd> zoom</span>
+      <span class="chip"><kbd>Shift</kbd> drag to pan</span>
+    </div>
+    <div id="empty" aria-live="polite" hidden></div>
+  </div>
+  <aside id="side">
+    <div id="panel"></div>
+    <div id="legend"></div>
+  </aside>
 </main>
+<div id="tip" role="tooltip"></div>
 <script>
-const DATA = /*DATA*/;
-const nodes = DATA.nodes.map((n, i) => ({ ...n, i, x: 0, y: 0, vx: 0, vy: 0, deg: 0 }));
-const edges = DATA.edges.map(([a, b, w]) => ({ a, b, w }));
-const links = nodes.map(() => []);
-for (const e of edges) { links[e.a].push(e.b); links[e.b].push(e.a); nodes[e.a].deg++; nodes[e.b].deg++; }
-
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-const view = { x: 0, y: 0, k: 1 };
-const filters = { text: '', folder: '', kind: '', community: '' };
-let selected = -1;
-let alpha = 1;
-let userMoved = false; // once set, the layout stops re-fitting the view
-let css = {};
-
-// Start on a spiral so the layout is deterministic.
-nodes.forEach((n, i) => {
-  const r = 12 * Math.sqrt(i + 1), t = i * 2.4;
-  n.x = r * Math.cos(t); n.y = r * Math.sin(t);
-});
-
-function step() {
-  const n = nodes.length, repel = 900, spring = 0.02, rest = 40;
-  for (let i = 0; i < n; i++) {
-    const a = nodes[i];
-    for (let j = i + 1; j < n; j++) {
-      const b = nodes[j];
-      let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 0.01;
-      if (d2 > 90000) continue;
-      const f = repel / d2, d = Math.sqrt(d2);
-      dx = dx / d * f; dy = dy / d * f;
-      a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
-    }
-  }
-  for (const e of edges) {
-    const a = nodes[e.a], b = nodes[e.b];
-    const dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) + 0.01;
-    const f = spring * (d - rest) / d;
-    a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f;
-  }
-  for (const p of nodes) {
-    p.vx -= p.x * 0.01; p.vy -= p.y * 0.01; // gentle pull to the centre
-    p.x += p.vx * alpha; p.y += p.vy * alpha;
-    p.vx *= 0.6; p.vy *= 0.6;
-  }
-  alpha *= 0.985;
-}
-
-const radius = n => 4 + Math.sqrt(n.deg) * 1.5;
-const color = n => `hsl(${(n.community * 137.5) % 360} 65% 55%)`;
-const searchText = n => (n.path + ' ' + n.symbols.map(s => s.name).join(' ')).toLowerCase();
-const visible = n =>
-  (!filters.folder || n.folder === filters.folder) &&
-  (!filters.community || String(n.community) === filters.community) &&
-  (!filters.kind || n.symbols.some(s => s.kind === filters.kind));
-const matches = n => !filters.text || searchText(n).includes(filters.text);
-
-function readColors() {
-  const style = getComputedStyle(document.documentElement);
-  css = { edge: style.getPropertyValue('--edge'), fg: style.getPropertyValue('--fg') };
-}
-
-function resize() {
-  const box = canvas.parentElement.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
-  canvas.width = box.width * dpr; canvas.height = box.height * dpr;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  readColors();
-  draw();
-}
-
-function draw() {
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  ctx.clearRect(0, 0, w, h);
-  ctx.save();
-  ctx.translate(w / 2 + view.x, h / 2 + view.y);
-  ctx.scale(view.k, view.k);
-  ctx.lineWidth = 1 / view.k;
-  ctx.strokeStyle = css.edge;
-  ctx.beginPath();
-  for (const e of edges) {
-    const a = nodes[e.a], b = nodes[e.b];
-    if (!visible(a) || !visible(b)) continue;
-    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-  }
-  ctx.stroke();
-  for (const n of nodes) {
-    if (!visible(n)) continue;
-    ctx.globalAlpha = matches(n) ? 1 : 0.12;
-    ctx.fillStyle = color(n);
-    ctx.beginPath(); ctx.arc(n.x, n.y, radius(n), 0, 6.2832); ctx.fill();
-    if (n.i === selected) {
-      ctx.lineWidth = 2 / view.k; ctx.strokeStyle = css.fg; ctx.stroke();
-    }
-  }
-  ctx.globalAlpha = 1;
-  if (view.k > 2.5) {
-    ctx.fillStyle = css.fg;
-    ctx.font = `${11 / view.k}px system-ui`;
-    for (const n of nodes) if (visible(n) && matches(n)) ctx.fillText(n.path.split('/').pop(), n.x + radius(n) + 2, n.y + 3);
-  }
-  ctx.restore();
-  const shown = nodes.filter(n => visible(n) && matches(n)).length;
-  document.getElementById('status').textContent = `${shown} of ${nodes.length} files · ${edges.length} links`;
-}
-
-function toWorld(px, py) {
-  return [(px - canvas.clientWidth / 2 - view.x) / view.k, (py - canvas.clientHeight / 2 - view.y) / view.k];
-}
-
-function pick(px, py) {
-  const [wx, wy] = toWorld(px, py);
-  let best = -1, bestD = Infinity;
-  for (const n of nodes) {
-    if (!visible(n)) continue;
-    const d = Math.hypot(n.x - wx, n.y - wy);
-    if (d <= radius(n) + 3 / view.k && d < bestD) { best = n.i; bestD = d; }
-  }
-  return best;
-}
-
-function text(tag, content, cls) {
-  const el = document.createElement(tag);
-  el.textContent = content;
-  if (cls) el.className = cls;
-  return el;
-}
-
-function select(i) {
-  selected = i;
-  const panel = document.getElementById('panel');
-  panel.replaceChildren();
-  if (i < 0) { draw(); return; }
-  const n = nodes[i];
-  panel.append(text('h2', n.path), text('p', `community ${n.community} · ${n.symbols.length} symbols`, 'muted'));
-  panel.append(text('h3', 'Symbols'));
-  const syms = document.createElement('ul');
-  for (const s of n.symbols) syms.append(text('li', `${n.path}:${s.line} ${s.name} (${s.kind})`));
-  if (!n.symbols.length) syms.append(text('li', 'none', 'muted'));
-  panel.append(syms, text('h3', `Linked files (${links[i].length})`));
-  const list = document.createElement('ul');
-  for (const j of links[i]) {
-    const li = document.createElement('li'), a = text('a', nodes[j].path, 'file');
-    a.onclick = () => {
-      if (!visible(nodes[j])) resetFilters(); // a hidden file can't be shown or centred
-      select(j); center(j);
-    };
-    li.append(a); list.append(li);
-  }
-  panel.append(list);
-  draw();
-}
-
-function center(i) {
-  userMoved = true;
-  view.x = -nodes[i].x * view.k; view.y = -nodes[i].y * view.k;
-  draw();
-}
-
-function fit() {
-  if (!nodes.length) return;
-  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  for (const n of nodes) {
-    x0 = Math.min(x0, n.x); x1 = Math.max(x1, n.x); y0 = Math.min(y0, n.y); y1 = Math.max(y1, n.y);
-  }
-  const w = x1 - x0 + 60, h = y1 - y0 + 60;
-  view.k = Math.max(0.05, Math.min(canvas.clientWidth / w, canvas.clientHeight / h, 3));
-  view.x = -(x1 + x0) / 2 * view.k;
-  view.y = -(y1 + y0) / 2 * view.k;
-}
-
-function resetFilters() {
-  for (const id of ['folder', 'kind', 'community']) {
-    document.getElementById(id).value = '';
-    filters[id] = '';
-  }
-}
-
-function fillSelect(id, label, values) {
-  const el = document.getElementById(id);
-  el.append(new Option(label, ''));
-  for (const [value, name] of values) el.append(new Option(name, value));
-  el.onchange = () => {
-    filters[id] = el.value;
-    if (selected >= 0 && !visible(nodes[selected])) select(-1);
-    draw();
-  };
-}
-
-const sorted = set => [...set].sort();
-fillSelect('folder', 'All folders', sorted(new Set(nodes.map(n => n.folder))).map(f => [f, f]));
-fillSelect('kind', 'All kinds', sorted(new Set(nodes.flatMap(n => n.symbols.map(s => s.kind)))).map(k => [k, k]));
-fillSelect('community', 'All communities', sorted(new Set(nodes.map(n => n.community))).sort((a, b) => a - b).map(c => [String(c), `community ${c}`]));
-
-const search = document.getElementById('search');
-search.oninput = () => { filters.text = search.value.trim().toLowerCase(); draw(); };
-search.onkeydown = e => {
-  if (e.key !== 'Enter') return;
-  const hit = nodes.find(n => visible(n) && matches(n));
-  if (hit) { select(hit.i); center(hit.i); }
-};
-
-let drag = null;
-canvas.onpointerdown = e => { if (e.button !== 0) return; drag = { x: e.clientX, y: e.clientY, moved: false }; canvas.setPointerCapture(e.pointerId); canvas.style.cursor = 'grabbing'; };
-canvas.onpointermove = e => {
-  if (!drag) return;
-  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-  if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-  userMoved = true;
-  view.x += dx; view.y += dy; drag.x = e.clientX; drag.y = e.clientY;
-  draw();
-};
-canvas.onpointercancel = () => { drag = null; canvas.style.cursor = 'grab'; };
-canvas.onpointerup = e => {
-  canvas.style.cursor = 'grab';
-  if (drag && !drag.moved) {
-    const box = canvas.getBoundingClientRect();
-    select(pick(e.clientX - box.left, e.clientY - box.top));
-  }
-  drag = null;
-};
-canvas.onwheel = e => {
-  e.preventDefault();
-  userMoved = true;
-  const box = canvas.getBoundingClientRect();
-  const [wx, wy] = toWorld(e.clientX - box.left, e.clientY - box.top);
-  view.k = Math.min(20, Math.max(0.05, view.k * Math.exp(-e.deltaY * 0.0015)));
-  view.x = e.clientX - box.left - canvas.clientWidth / 2 - wx * view.k;
-  view.y = e.clientY - box.top - canvas.clientHeight / 2 - wy * view.k;
-  draw();
-};
-window.onresize = resize;
-matchMedia('(prefers-color-scheme: dark)').onchange = () => { readColors(); draw(); };
-
-// Let the layout settle over a few frames so the page stays responsive on big projects.
-function settle() {
-  const steps = nodes.length > 2000 ? 1 : 4;
-  for (let i = 0; i < steps && alpha > 0.02; i++) step();
-  if (!userMoved) fit();
-  draw();
-  if (alpha > 0.02) requestAnimationFrame(settle);
-}
-resize();
-settle();
-</script>
+/*SCRIPT*/</script>
 </body>
 </html>
