@@ -743,3 +743,34 @@ fn tour_lists_a_reading_order() {
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(v[0]["path"].is_string());
 }
+
+#[test]
+fn teach_adds_plain_language_lines_only_when_asked() {
+    let dir = project();
+    assert!(run(dir.path(), &["index"]).status.success());
+    let plain = stdout(&run(dir.path(), &["def", "alpha"]));
+    assert!(!plain.contains("terms:"), "{plain}");
+    let taught = stdout(&run(dir.path(), &["def", "alpha", "--teach"]));
+    assert!(
+        taught.contains("  terms: pub = visible outside its module; fn = a function"),
+        "{taught}"
+    );
+    assert!(
+        taught.starts_with(plain.trim_end()),
+        "plain line comes first"
+    );
+    let explained = stdout(&run(dir.path(), &["explain", "beta", "--teach"]));
+    assert!(
+        explained.contains("terms:") && explained.contains("read next: alpha"),
+        "{explained}"
+    );
+}
+
+#[test]
+fn teach_changes_nothing_in_json_output() {
+    let dir = project();
+    assert!(run(dir.path(), &["index"]).status.success());
+    let plain = stdout(&run(dir.path(), &["--json", "def", "alpha"]));
+    let taught = stdout(&run(dir.path(), &["--json", "def", "alpha", "--teach"]));
+    assert_eq!(plain, taught);
+}

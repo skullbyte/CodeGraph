@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use crate::ask;
 use crate::community::{self, Community};
+use crate::glossary;
 use crate::index;
 use crate::model::Index;
 use crate::query;
@@ -133,15 +134,20 @@ impl Server {
             .enumerate()
             .map(|(n, stop)| stop.text(n + 1))
             .collect(),
-            "def" => semantic::def_with(index, &store, text(args, "name")?)
-                .iter()
-                .map(query::DefHit::text)
-                .collect(),
+            "def" => glossary::def_lines(
+                &root,
+                &semantic::def_with(index, &store, text(args, "name")?),
+                flag(args, "teach"),
+            ),
             "callers" => semantic::callers_with(index, &store, text(args, "name")?)
                 .iter()
                 .map(query::CallerHit::text)
                 .collect(),
-            "explain" => semantic::explain_with(index, &store, text(args, "name")?).lines(),
+            "explain" => glossary::explain_lines(
+                &root,
+                &semantic::explain_with(index, &store, text(args, "name")?),
+                flag(args, "teach"),
+            ),
             "path" => query::path(index, text(args, "from")?, text(args, "to")?)
                 .iter()
                 .map(query::Hop::text)
@@ -274,8 +280,8 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "def",
-            "Where a symbol is defined (path:line signature).",
-            with(&name),
+            "Where a symbol is defined (path:line signature). teach=true adds plain-language lines.",
+            with(&json!({ "name": name["name"], "teach": { "type": "boolean" } })),
             &["name"],
         ),
         tool(
@@ -286,8 +292,8 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "explain",
-            "Definition, callers and callees of a name.",
-            with(&name),
+            "Definition, callers and callees of a name. teach=true adds plain-language lines.",
+            with(&json!({ "name": name["name"], "teach": { "type": "boolean" } })),
             &["name"],
         ),
         tool(
@@ -324,6 +330,11 @@ fn tools() -> Vec<Value> {
             &[],
         ),
     ]
+}
+
+/// An optional true/false argument; anything but `true` counts as false.
+fn flag(args: &Value, key: &str) -> bool {
+    args.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 /// A required, bounded string argument.
@@ -816,5 +827,28 @@ mod tests {
                 .iter()
                 .any(|t| t["name"] == "tour")
         );
+    }
+
+    #[test]
+    fn teach_is_an_optional_flag_on_def_and_explain() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "/// Adds.\npub fn one() {}\n").unwrap();
+        let mut server = Server::new(dir.path());
+        let plain = call(&mut server, "def", json!({ "name": "one" })).0;
+        assert!(!plain.contains("terms:"), "{plain}");
+        let taught = call(&mut server, "def", json!({ "name": "one", "teach": true })).0;
+        assert!(
+            taught.contains("terms: pub") && taught.contains("doc: Adds."),
+            "{taught}"
+        );
+        let explained = call(
+            &mut server,
+            "explain",
+            json!({ "name": "one", "teach": true }),
+        )
+        .0;
+        assert!(explained.contains("terms: pub"), "{explained}");
+        let not_a_flag = call(&mut server, "def", json!({ "name": "one", "teach": "yes" })).0;
+        assert_eq!(not_a_flag, plain, "anything but true is false");
     }
 }

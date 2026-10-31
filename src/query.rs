@@ -457,11 +457,16 @@ const LIST_LIMIT: usize = 20;
 
 impl Explain {
     pub fn lines(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .defs
-            .iter()
-            .map(|d| format!("def {}", d.text()))
-            .collect();
+        self.lines_with(|_| Vec::new())
+    }
+
+    /// Like `lines`, with `under(def)` printed right below each `def` line.
+    pub fn lines_with(&self, under: impl Fn(&DefHit) -> Vec<String>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for d in &self.defs {
+            out.push(format!("def {}", d.text()));
+            out.extend(under(d));
+        }
         for (arrow, links) in [("<-", &self.incoming), ("->", &self.outgoing)] {
             out.extend(
                 links

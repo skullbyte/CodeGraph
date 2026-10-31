@@ -9,11 +9,11 @@ fewer tokens. Rust, TypeScript/TSX, JavaScript, Python, Java, C#, Go and C/C++ a
 codegraph index [dir]        # writes .claude/codemap.md and .claude/graph.json (incremental)
 codegraph query "<question>" # plain English: matching symbols + what they call / are called by (--depth, --budget tokens, --dfs)
 codegraph tour               # reading order: entry files, then the key file of each cluster (--top N)
-codegraph def <name>         # path:line signature
+codegraph def <name>         # path:line signature (--teach adds what the keywords mean + the doc comment)
 codegraph callers <name>     # path:line  in <enclosing fn>
 codegraph path <A> <B>       # shortest call chain (function names) or import chain (file paths)
 codegraph update <file>      # re-index one file
-codegraph explain <name>     # definition + callers + callees
+codegraph explain <name>     # definition + callers + callees (--teach: plain-language lines + what to read next)
 codegraph affected <name>    # everything that depends on it (--depth N to limit)
 codegraph hubs               # most-connected symbols (--top N, default 10)
 codegraph report             # writes .claude/GRAPH_REPORT.md: key modules, hubs, surprising links, communities

@@ -14,8 +14,8 @@ use serde::Serialize;
 use codegraph::model::Index;
 use codegraph::query::{Affected, CallerHit, DefHit, Hop, Hub};
 use codegraph::{
-    benchmark, codemap, community, hook, html, index, install, mermaid, obsidian, query, report,
-    scip, semantic, serve, watch,
+    benchmark, codemap, community, glossary, hook, html, index, install, mermaid, obsidian, query,
+    report, scip, semantic, serve, watch,
 };
 
 /// Fast offline code graph: where is X, who calls X, how does A reach B.
@@ -60,7 +60,12 @@ enum Command {
         top: usize,
     },
     /// Where is <name> defined?
-    Def { name: String },
+    Def {
+        name: String,
+        /// Add a plain-language line under each hit (what the keywords mean, its doc comment); text output only.
+        #[arg(long)]
+        teach: bool,
+    },
     /// Who calls <name>?
     Callers { name: String },
     /// Shortest call chain (function names) or import chain (file paths) from A to B.
@@ -68,7 +73,12 @@ enum Command {
     /// Re-index one file.
     Update { file: PathBuf },
     /// Definition, callers and callees of <name>.
-    Explain { name: String },
+    Explain {
+        name: String,
+        /// Add plain-language lines: what the keywords mean, the doc comment, what to read next (text output only).
+        #[arg(long)]
+        teach: bool,
+    },
     /// Everything that depends on <name>: its callers, their callers, and so on.
     Affected {
         name: String,
@@ -222,11 +232,16 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Def { name } => print_results(
-            &semantic::def_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name),
-            cli.json,
-            DefHit::text,
-        ),
+        Command::Def { name, teach } => {
+            let hits = semantic::def_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name);
+            if *teach && !cli.json {
+                glossary::def_lines(&cli.dir, &hits, true)
+                    .iter()
+                    .for_each(|line| println!("{line}"));
+                return Ok(());
+            }
+            print_results(&hits, cli.json, DefHit::text)
+        }
         Command::Callers { name } => print_results(
             &semantic::callers_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name),
             cli.json,
@@ -241,13 +256,15 @@ fn run(cli: Cli) -> Result<()> {
             print_results(&hops, cli.json, Hop::text)
         }
         Command::Update { file } => cmd_update(&cli.dir, file),
-        Command::Explain { name } => {
+        Command::Explain { name, teach } => {
             let explained =
                 semantic::explain_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name);
             if cli.json {
                 println!("{}", serde_json::to_string(&explained)?);
             } else {
-                explained.lines().iter().for_each(|line| println!("{line}"));
+                glossary::explain_lines(&cli.dir, &explained, *teach)
+                    .iter()
+                    .for_each(|line| println!("{line}"));
             }
             Ok(())
         }

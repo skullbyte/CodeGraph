@@ -12,6 +12,7 @@ This project is indexed. The `codegraph` MCP tools (or the same commands on the 
 - `def <name>`: where a symbol is defined (`path:line signature`).
 - `callers <name>`: call sites, `path:line  in <calling function>`.
 - `explain <name>`: definition, callers and callees together.
+- Learning a codebase? Add `teach` (`--teach` on the CLI) to `def` or `explain`: one plain line on what the keywords mean, the doc comment, and what to read next. Made from a fixed glossary, so it costs no AI tokens to produce.
 - `affected <name>`: everything that depends on it (callers of callers).
 - `path <A> <B>`: shortest call chain between two functions, or import chain between two files.
 - `hubs`, `community <file>`, `stats`: the shape of the project.

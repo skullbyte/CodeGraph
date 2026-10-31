@@ -4,6 +4,7 @@ pub mod ask;
 pub mod benchmark;
 pub mod codemap;
 pub mod community;
+pub mod glossary;
 pub mod hook;
 pub mod html;
 pub mod index;
