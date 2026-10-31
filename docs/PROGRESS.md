@@ -1,28 +1,21 @@
 # codegraph progress
 
 ## Now
-Goal: Phase 5 (SCIP precision) committed (plan: ~/.claude/plans/glowing-skipping-mountain.md). Open: the real-world check on tokio and the TS copy needs `rustup component add rust-analyzer` and `npm i -g @sourcegraph/scip-typescript`, run by the user; then Phase 6 (MCP server, skill, hook) after the user OK.
-State: 8 language families indexed (Rust, TS/TSX, JS, Python, Java, C#, Go, C/C++); `codegraph scip` imports SCIP. `just check` green: 188 unit + 25 end-to-end tests. `origin` = github.com/skullbyte/CodeGraph (the user pushes). Commit hashes changed on 2026-10-29 (identity rewrite).
-Next step: stop for the user OK, then Phase 5 (A.5): import SCIP from rust-analyzer / scip-typescript to fix name-based matching (see docs/REQUIREMENTS.md); plan first. Keep the Graphify checklist refreshed as features land.
+Goal: Phase 7 (documents in the graph, token-cheap at any size). Plan: ~/.claude/plans/foamy-enchanting-turing.md (approved 2026-10-31).
+State: Phases 1-6 done and installed here (binary in ~/.local/bin, `.mcp.json`, hooks, skill; SCIP imported, `just scip` refreshes it). Phase 7 step 1 (free markdown scan) committed as 5f8c698 after 4 review rounds. `just check` green: 202 unit + 25 end-to-end tests. Tree clean; nothing pushed (the user pushes).
+Step 2 (uncommitted, reviewed in 3 rounds, last answer "no remaining issues"; `just check` green: 217 unit + 26 e2e): `src/semantic.rs` (store, `is_sensitive`, `pending`, `ingest` with validation, `def_with`/`callers_with`/`explain_with`), `walk::list_docs`, `codegraph docs pending|ingest`; `def`/`callers`/`explain` (CLI and MCP) show `[concept]` and `[doc]` lines from the store, AMBIGUOUS hidden.
+Next step: step 3 (skill `codegraph-docs`, installed by `install`), then step 5 (numbers on real repos, commit by file name). Step 4 (PDFs) needs the user's OK before any new crate.
 
 ## Checklist
 - [x] Phase 1 (A.1) core engine: Rust + TS/TSX extraction, walker, parallel incremental index, codemap/graph.json/graph.bin, index/update/watch/def/callers/explain/path/affected/hubs, tsconfig aliases, benchmarks (done 2026-10-27)
 - [x] Phase 2 (A.2) Analysis: file-level Louvain communities, `codegraph report` -> .claude/GRAPH_REPORT.md, `codegraph benchmark` vs Graphify (reviewed, committed)
-- [x] Phase 3 (A.3) Visuals
-  - [x] `codegraph html`: offline 3D space view + Graphify web features, reviewed, committed (d10f627, c4de95b, 50d60cf)
-  - [x] Mermaid callflow export: `codegraph mermaid <name> [--depth 2]` (src/mermaid.rs, reviewed, committed)
-  - [x] Obsidian vault export: `codegraph obsidian [--out DIR]` (src/obsidian.rs, reviewed, committed)
+- [x] Phase 3 (A.3) Visuals: `codegraph html` (offline 3D view + Graphify web features), `mermaid`, `obsidian`; reviewed, committed (done 2026-10-30)
 - [x] Phase 4 (A.4) More languages: Rust, TS/TSX, JS, Python, Java, C#, Go, C/C++ (plan in ~/.claude/plans/glowing-skipping-mountain.md)
-  - [x] JavaScript (.js .jsx .mjs .cjs; TSX grammar, `require('./x')` imports)
-  - [x] Python (src/lang/python.rs, shared walker src/lang/generic.rs; deps added by the user)
-  - [x] Java (src/lang/java.rs; imports resolve to a unique `a/b/C.java`)
-  - [x] C# (src/lang/csharp.rs) and Go (src/lang/golang.rs): no import edges (namespace / package, not a file); link through calls only
-  - [x] C/C++ (src/lang/c.rs, one table; `.h` tried as C, then C++ if that has errors; typedefs give every name)
 - [~] Phase 5 (A.5) Precision (committed; checked on real indexes: this repo, pizzeria and tokio, numbers in Decisions): SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
 - [x] Phase 6 (A.6) Claude Code integration: MCP server (`serve`), hook, skill, `install`/`uninstall`; installed here 2026-10-31 (binary symlinked to ~/.local/bin), MCP tools `def`/`stats` verified live after restart; hook nudge observed; `install` replaced the codemap.sh SessionStart hook, re-added by hand (re-check after any reinstall); SCIP imported here (6029 of 6212 calls), refresh with `just scip`
 - [~] Phase 7 (A.7) Documents (plan: ~/.claude/plans/foamy-enchanting-turing.md; token-cheap at any size)
   - [x] step 1: free markdown scan (`src/lang/markdown.rs`: headings, doc links, `code` mentions; `Kind::Heading`; docs never count as code: `graph_calls()` empty for docs, `Kind::is_code_def`, `callers` lists `[doc]` mentions only for names with one code definition); reviewed (4 rounds, "no remaining issues"), committed
-  - [ ] step 2: `codegraph docs pending|ingest` + `.claude/semantic.json` store (AI pass, spends Claude tokens, cached by hash)
+  - [x] step 2: `codegraph docs pending|ingest` + `.claude/semantic.json` store (AI pass, spends Claude tokens, cached by hash) (store, pending, ingest, queries read the store; reviewed)
   - [ ] step 3: skill `codegraph-docs`; [ ] step 4: PDFs (ask before adding a crate); [ ] step 5: review loop, numbers, commit
 - [ ] Part B: full Graphify parity (order chosen by the user later)
 - [ ] Open: update on tokio is ~19-21 ms (target < 20 ms); `docs/REQUIREMENTS.md` Part A/B is the source of truth for scope
@@ -110,7 +103,16 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
 - 2026-10-27 `report` and `benchmark` are separate commands: `index`/`update`/`watch` stay at ~20 ms
 - 2026-10-27 `benchmark` shells out to `graphify extract` (temp dir, removed after) and times both tools as processes; needs an existing index
 
+- 2026-10-31 hooks written by `codegraph install` are guarded (`command -v codegraph >/dev/null 2>&1 || exit 0; codegraph hook ...`, exit code of the hook itself passes through): a fresh clone or CI without the binary must not fail every tool call; the old plain commands stay recognised so reinstall upgrades and uninstall removes them
+- 2026-10-31 `install` rewrites the old `codemap.sh` SessionStart line into the guarded `codegraph index` (first match only; nothing is rewritten once a guarded line exists), so a hand-kept codemap.sh line survives reinstalls
+- 2026-10-31 `just scip` (rust-analyzer scip . + codegraph scip) refreshes exact call data after code changes; `index.scip` is git-ignored; CLAUDE.md rule: review loop = repeat `code-reviewer` (Sonnet) until it answers "no remaining issues"
+- 2026-10-31 global `~/.claude/CLAUDE.md` lists the installed modern CLI tools (rg fd eza bat sd jq duf tldr fzf just dust tokei delta difft yq gh ast-grep hyperfine procs btm xh) for every session, repo or not
+- 2026-10-31 Phase 7 design (user chose both layers, token efficiency at any size): free markdown scan on every index; the AI semantic pass (spends Claude tokens, never call it "paid") is opt-in, cached per file hash in its own store so a rebuilt binary does not redo it; small jobs inline, large ones in ~6000-line chunks to Sonnet subagents
+- 2026-10-31 docs are not code: a heading is not a definition (`Kind::is_code_def`), doc mentions are not calls (`FileEntry::graph_calls` is empty for docs; `Index::code_totals` for counts), `callers` appends `[doc]` mentions only for names with exactly one code definition; scanner skips fences/front matter, `#hashtag` is not a heading; left alone on purpose: nested parentheses in link targets, indented code blocks, percent-encoded links
+
 ## Gotchas
+- `codegraph install` converts any line equal to the old codemap.sh command into `codegraph index`: check `.claude/settings.json` SessionStart after a reinstall
+- `paru -S` aborts the whole transaction when one package fails to download (difftastic did on the mirrors; a retry later worked); zsh aborts a command whose glob matches nothing before running it
 - Page work: edit only the part files in `src/html/` (js/01..10, style.css, template.html); `rg -c 'https?://|innerHTML|<img|url\(' src/html/` must print nothing; Rust tests fix `const DATA = /*DATA*/;` and `{{TITLE}}`
 - Brave tests: serve `bench/pizzeria/.claude` with `exec python3 -m http.server <port> --bind 127.0.0.1` as a background task; stop it by PID from `ss -ltnp` (`pkill -f` kills the shell, exit 144). Regenerate with `cargo build --release && ./target/release/codegraph index --dir bench/pizzeria && ./target/release/codegraph html --dir bench/pizzeria`
 - Impeccable files (`.claude/skills/impeccable/`, `.claude/agents/impeccable-*.md`, `.impeccable/`) are gitignored: commit by file name, never `git add -A`
@@ -144,3 +146,4 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
 - 2026-10-30 hook security (review): counters live in a private 0700 dir (XDG_RUNTIME_DIR, else temp/codegraph-hook-<user>), append-only files named by a blake3 hash of session+agent ids, symlinks refused
 - 2026-10-31 Phase 7 step 1 numbers (release): tokio now 839 files (25 are .md): cold index 77 ms, cached 28 ms (was ~60 / 25); `hubs` unchanged; this repo 46 files; `callers assemble` shows its code call plus `docs/PROGRESS.md:85  in Decisions  [doc]`. Design: a heading is not a definition (would break unique-name checks), doc mentions are not calls (heading text like "Getting started" would become a fake caller), the hook still ignores reads of .md
 - 2026-10-31 user rule: never call AI passes "paid"; codegraph is free, the AI layer spends Claude tokens
+- 2026-10-31 Phase 7 step 2 design: ingest prunes store entries of docs that vanished or became secret-named; names lose control/bidi/zero-width chars (a newline would fake a result line); links/concepts need a line inside the doc; `docs ingest` reads at most 1 MB; the MCP loads the store only for def/callers/explain and ignores a damaged one (stderr note)

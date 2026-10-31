@@ -15,6 +15,7 @@ use crate::community::{self, Community};
 use crate::index;
 use crate::model::Index;
 use crate::query;
+use crate::semantic;
 
 /// A longer line (line ending included) is refused: a client cannot make the server buffer
 /// unbounded input. JSON-RPC batches (an array) are not supported; 2025-06-18 removed them.
@@ -93,20 +94,33 @@ impl Server {
         )
     }
 
+    /// The doc store, loaded only for the tools that show it. A damaged store must not break them:
+    /// they then simply show no doc links.
+    fn store_for(&self, tool: &str) -> semantic::Store {
+        if !["def", "callers", "explain"].contains(&tool) {
+            return semantic::Store::default();
+        }
+        semantic::load_store(&self.root).unwrap_or_else(|e| {
+            eprintln!("codegraph: ignoring damaged .claude/semantic.json: {e:#}");
+            semantic::Store::default()
+        })
+    }
+
     fn run_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let limit = number(args, "limit", DEFAULT_LIMIT)?;
+        let store = self.store_for(name);
         let loaded = self.loaded()?;
         let index = &loaded.index;
         let lines: Vec<String> = match name {
-            "def" => query::def(index, text(args, "name")?)
+            "def" => semantic::def_with(index, &store, text(args, "name")?)
                 .iter()
                 .map(query::DefHit::text)
                 .collect(),
-            "callers" => query::callers(index, text(args, "name")?)
+            "callers" => semantic::callers_with(index, &store, text(args, "name")?)
                 .iter()
                 .map(query::CallerHit::text)
                 .collect(),
-            "explain" => query::explain(index, text(args, "name")?).lines(),
+            "explain" => semantic::explain_with(index, &store, text(args, "name")?).lines(),
             "path" => query::path(index, text(args, "from")?, text(args, "to")?)
                 .iter()
                 .map(query::Hop::text)

@@ -631,3 +631,62 @@ fn hook_ignores_an_empty_project_dir_variable() {
         stdout(&out)
     );
 }
+
+#[test]
+fn docs_pending_then_ingest_then_nothing_pending() {
+    let dir = project();
+    fs::write(dir.path().join("README.md"), "# Title\nUses `alpha`.\n").unwrap();
+    assert!(run(dir.path(), &["index"]).status.success());
+
+    let pending = stdout(&run(dir.path(), &["docs", "pending"]));
+    assert!(pending.contains("README.md"), "{pending}");
+    assert!(pending.contains("inline"), "{pending}");
+
+    let json = stdout(&run(dir.path(), &["--json", "docs", "pending"]));
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let hash = v["docs"][0]["hash"].as_str().unwrap();
+    let sub = dir.path().join("sub.json");
+    fs::write(
+        &sub,
+        format!(
+            r#"{{"file":"README.md","hash":"{hash}","concepts":[],"links":[{{"line":2,"to":"alpha","rel":"describes","conf":"INFERRED"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let out = run(dir.path(), &["docs", "ingest", sub.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout(&out).contains("1 links"), "{}", stdout(&out));
+    assert!(stdout(&run(dir.path(), &["docs", "pending"])).contains("0 docs"));
+
+    fs::write(dir.path().join("README.md"), "# Title\nchanged\n").unwrap();
+    let stale = run(dir.path(), &["docs", "ingest", sub.to_str().unwrap()]);
+    assert!(!stale.status.success(), "a stale hash must be refused");
+}
+
+#[cfg(unix)]
+#[test]
+fn docs_ingest_refuses_a_symlinked_doc() {
+    let dir = project();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("real.md"), "# Outside\n").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("real.md"), dir.path().join("link.md")).unwrap();
+    assert!(run(dir.path(), &["index"]).status.success());
+    assert!(!stdout(&run(dir.path(), &["docs", "pending"])).contains("link.md"));
+
+    let hash = blake3::hash(b"# Outside\n").to_hex().to_string();
+    let sub = dir.path().join("sub.json");
+    fs::write(
+        &sub,
+        format!(
+            r#"{{"file":"link.md","hash":"{}","concepts":[],"links":[]}}"#,
+            &hash[..16]
+        ),
+    )
+    .unwrap();
+    let out = run(dir.path(), &["docs", "ingest", sub.to_str().unwrap()]);
+    assert!(!out.status.success(), "a symlink must not be ingested");
+}

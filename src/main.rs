@@ -15,7 +15,7 @@ use codegraph::model::Index;
 use codegraph::query::{Affected, CallerHit, DefHit, Hop, Hub};
 use codegraph::{
     benchmark, codemap, community, hook, html, index, install, mermaid, obsidian, query, report,
-    scip, serve, watch,
+    scip, semantic, serve, watch,
 };
 
 /// Fast offline code graph: where is X, who calls X, how does A reach B.
@@ -99,6 +99,11 @@ enum Command {
         #[arg(value_parser = ["search", "read"])]
         kind: String,
     },
+    /// The optional AI layer for documents: list what Claude still has to read, store what it found.
+    Docs {
+        #[command(subcommand)]
+        action: DocsAction,
+    },
     /// Serve the queries to Claude Code as MCP tools over stdin/stdout.
     Serve,
     /// Compare codegraph with Graphify (if installed): index time and `explain` answers.
@@ -116,6 +121,18 @@ enum Command {
         #[arg(long, default_value_t = 500)]
         interval_ms: u64,
     },
+}
+
+#[derive(Subcommand)]
+enum DocsAction {
+    /// Docs not read yet (new or changed), with line counts and the plan: inline or subagent chunks.
+    Pending {
+        /// Stop the list before it goes over this many lines.
+        #[arg(long)]
+        max_lines: Option<usize>,
+    },
+    /// Validate and store what an agent found in one doc (a JSON file).
+    Ingest { file: PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -151,11 +168,13 @@ fn run(cli: Cli) -> Result<()> {
             let root = root.as_ref().unwrap_or(&cli.dir);
             cmd_index(root)
         }
-        Command::Def { name } => {
-            print_results(&query::def(&load(&cli.dir)?, name), cli.json, DefHit::text)
-        }
+        Command::Def { name } => print_results(
+            &semantic::def_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name),
+            cli.json,
+            DefHit::text,
+        ),
         Command::Callers { name } => print_results(
-            &query::callers(&load(&cli.dir)?, name),
+            &semantic::callers_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name),
             cli.json,
             CallerHit::text,
         ),
@@ -169,7 +188,8 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Update { file } => cmd_update(&cli.dir, file),
         Command::Explain { name } => {
-            let explained = query::explain(&load(&cli.dir)?, name);
+            let explained =
+                semantic::explain_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name);
             if cli.json {
                 println!("{}", serde_json::to_string(&explained)?);
             } else {
@@ -215,6 +235,7 @@ fn run(cli: Cli) -> Result<()> {
             cmd_hook(&cli.dir, kind);
             Ok(())
         }
+        Command::Docs { action } => cmd_docs(&cli.dir, action, cli.json),
         Command::Serve => serve::run(&cli.dir),
         Command::Scip { file } => cmd_scip(&cli.dir, file.as_deref(), cli.json),
         Command::Obsidian { out } => {
@@ -462,6 +483,57 @@ fn cmd_hook(dir: &Path, kind: &str) {
     }
 }
 
+fn cmd_docs(root: &Path, action: &DocsAction, json: bool) -> Result<()> {
+    match action {
+        DocsAction::Pending { max_lines } => {
+            let store = semantic::load_store(root)?;
+            let pending = semantic::pending(root, &store, *max_lines)?;
+            if json {
+                println!("{}", serde_json::to_string(&pending)?);
+            } else {
+                print_pending(&pending);
+            }
+            Ok(())
+        }
+        DocsAction::Ingest { file } => {
+            let raw = read_capped(file)?;
+            let idx = load(root)?;
+            let _lock = index::lock(root)?;
+            let mut store = semantic::load_store(root)?;
+            let summary = semantic::ingest(root, &idx, &mut store, &raw)?;
+            semantic::save_store(root, &store)?;
+            if json {
+                println!("{}", serde_json::to_string(&summary)?);
+            } else {
+                println!(
+                    "stored {} concepts, {} links ({} dropped)",
+                    summary.concepts, summary.links, summary.dropped
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_pending(p: &semantic::Pending) {
+    let plan = if p.chunks.is_empty() {
+        "inline: the main agent reads them, no subagents".to_string()
+    } else {
+        format!(
+            "{} subagent chunks of at most {} lines",
+            p.chunks.len(),
+            semantic::CHUNK_LINES
+        )
+    };
+    println!("{} docs, {} lines: {plan}", p.docs.len(), p.total_lines);
+    for (n, chunk) in p.chunks.iter().enumerate() {
+        println!("chunk {}: {}", n + 1, chunk.join(" "));
+    }
+    for d in &p.docs {
+        println!("{}  {} lines  {}", d.path, d.lines, d.hash);
+    }
+}
+
 fn cmd_scip(root: &Path, file: Option<&Path>, json: bool) -> Result<()> {
     let path = file.map_or_else(|| root.join("index.scip"), Path::to_path_buf);
     let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -497,6 +569,19 @@ fn cmd_scip(root: &Path, file: Option<&Path>, json: bool) -> Result<()> {
     }
     println!();
     Ok(())
+}
+
+/// Read an agent-written file, never more than the ingest cap (it may be huge or a device).
+fn read_capped(file: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut raw = String::new();
+    let limit = semantic::MAX_INGEST_BYTES as u64 + 1;
+    fs::File::open(file)
+        .with_context(|| format!("opening {}", file.display()))?
+        .take(limit)
+        .read_to_string(&mut raw)
+        .with_context(|| format!("reading {}", file.display()))?;
+    Ok(raw)
 }
 
 fn load(root: &Path) -> Result<Index> {

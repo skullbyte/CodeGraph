@@ -12,6 +12,20 @@ const SKIP_DIRS: [&str; 5] = ["node_modules", "target", "Library", "build", "dis
 
 /// Supported source files under `root`, as sorted `/`-separated paths relative to `root`.
 pub fn list_files(root: &Path) -> Result<Vec<String>> {
+    walk(root, |rel| Lang::from_path(rel).is_some())
+}
+
+/// Documentation files under `root` (`.md .mdx .markdown .rst .txt .pdf`), same rules as `list_files`.
+pub fn list_docs(root: &Path) -> Result<Vec<String>> {
+    walk(root, |rel| {
+        let ext = rel.rsplit_once('.').map_or("", |(_, e)| e);
+        ["md", "mdx", "markdown", "rst", "txt", "pdf"]
+            .iter()
+            .any(|d| ext.eq_ignore_ascii_case(d))
+    })
+}
+
+fn walk(root: &Path, wanted: impl Fn(&str) -> bool) -> Result<Vec<String>> {
     let walker = WalkBuilder::new(root)
         .require_git(false)
         .filter_entry(|e| !e.file_type().is_some_and(|t| t.is_dir()) || !is_skipped(e.file_name()))
@@ -28,7 +42,7 @@ pub fn list_files(root: &Path) -> Result<Vec<String>> {
             .strip_prefix(root)?
             .to_string_lossy()
             .replace('\\', "/");
-        if Lang::from_path(&rel).is_some() {
+        if wanted(&rel) {
             files.push(rel);
         }
     }
