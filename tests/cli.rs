@@ -519,7 +519,7 @@ fn serve_speaks_mcp_over_stdin_and_stdout() {
         .collect();
     assert_eq!(replies.len(), 3, "the notification gets no reply");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "codegraph");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 9);
     assert_eq!(
         replies[2]["result"]["content"][0]["text"],
         "src/lib.rs:3  in pub fn beta"
@@ -708,4 +708,26 @@ fn docs_text_on_a_damaged_pdf_fails_fast() {
     let out = run(dir.path(), &["docs", "text", "bad.pdf"]);
     assert!(!out.status.success());
     assert!(stdout(&run(dir.path(), &["docs", "pending"])).contains("bad.pdf  0 lines"));
+}
+
+#[test]
+fn query_answers_a_plain_english_question() {
+    let dir = project();
+    assert!(run(dir.path(), &["index"]).status.success());
+    let out = stdout(&run(dir.path(), &["query", "who calls alpha"]));
+    assert!(out.starts_with("start: alpha"), "{out}");
+    assert!(
+        out.contains("beta -> alpha") || out.contains("beta"),
+        "{out}"
+    );
+    let none = stdout(&run(dir.path(), &["query", "zzzz"]));
+    assert_eq!(none.trim(), "no matching symbols");
+    let json = stdout(&run(dir.path(), &["--json", "query", "alpha"]));
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["seeds"][0], "alpha");
+    assert!(
+        !run(dir.path(), &["query", "alpha", "--depth", "9"])
+            .status
+            .success()
+    );
 }

@@ -1,5 +1,6 @@
 //! codegraph library: parse source files into a symbol/import/call graph and query it.
 
+pub mod ask;
 pub mod benchmark;
 pub mod codemap;
 pub mod community;

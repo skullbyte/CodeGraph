@@ -63,7 +63,7 @@ Exports (`G/export.py`, `G/exporters/`):
 Commands:
 - [x] path, explain, affected, god-nodes (= our `hubs`), watch, update, benchmark (~: index time + explain tokens only)
 - [x] cluster-only (= our `report`); [ ] label (LLM-named communities)
-- [ ] query "<question>" (BFS/DFS with --depth/--budget)
+- [x] query "<question>" (`src/ask.rs`; Graphify `serve.py` `_score_query`/`_pick_seeds`/`_bfs`; ours: symbol nodes, hubs last, 1000-token default, MCP tool `query`)
 - [ ] diagnose multigraph, check-update, cache-check
 - [ ] hook install/uninstall/status (git hooks), install/uninstall per AI platform, serve (graph server/MCP) -> Phase 6
 - [ ] extract (AST + LLM), provider, add <url>, transcribe (audio/video), manifest/mcp/pg ingest -> Phase 7 / Part B
@@ -150,3 +150,4 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
 - 2026-10-31 Phase 7 step 2 design: ingest prunes store entries of docs that vanished or became secret-named; names lose control/bidi/zero-width chars (a newline would fake a result line); links/concepts need a line inside the doc; `docs ingest` reads at most 1 MB; the MCP loads the store only for def/callers/explain and ignores a damaged one (stderr note)
 - 2026-11-01 Phase 7 numbers (release): `docs pending` on tokio = 25 docs, 7,945 lines, 2 subagent chunks (CHANGELOGs dominate); cached index unchanged at 28 ms; this repo = 5 docs, 379 lines, inline
 - 2026-11-01 PDFs: new dependency `pdf-extract` (approved by the user; many transitive crates, release binary ~20 -> 23 MB). Extraction runs on a thread with a timeout and catch_unwind; known limit: a decompression bomb can use memory before the timeout (a safe cap needs a separate process); failed extractions are not cached (re-tried on each `docs pending`); `ingest` refuses a PDF with no text
+- 2026-11-01 Part B round 1 (plan ~/.claude/plans/velvet-crafting-simon.md): step 1 `codegraph query` done and reviewed (2 rounds); tokio `query "who notifies waiters"` 28 ms; matching is by word, no stemming ("notifies" does not match `notify`); generic hubs (`new`, `spawn`) are listed last so the budget cuts them first. Next: step 2 `tour`, step 3 `--teach`; then (user order) more languages, big-graph html view, Obsidian canvas, label + reflect

@@ -11,6 +11,7 @@ use std::time::SystemTime;
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use crate::ask;
 use crate::community::{self, Community};
 use crate::index;
 use crate::model::Index;
@@ -23,6 +24,7 @@ const MAX_LINE: usize = 1 << 20;
 /// Result lines returned when the caller gives no `limit`; the rest is summarised.
 const DEFAULT_LIMIT: usize = 40;
 const MAX_LIMIT: usize = 200;
+const MAX_BUDGET: usize = 20_000;
 const MAX_ARG_LEN: usize = 512;
 /// Newest first; a client asking for an older one gets it back, an unknown one gets the newest.
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -112,6 +114,14 @@ impl Server {
         let loaded = self.loaded()?;
         let index = &loaded.index;
         let lines: Vec<String> = match name {
+            "query" => {
+                let opts = ask::Options {
+                    depth: bounded(args, "depth", ask::DEFAULT_DEPTH, ask::MAX_DEPTH)?,
+                    budget: bounded(args, "budget", ask::DEFAULT_BUDGET, MAX_BUDGET)?,
+                    dfs: false,
+                };
+                ask::query(index, text(args, "question")?, &opts).lines()
+            }
             "def" => semantic::def_with(index, &store, text(args, "name")?)
                 .iter()
                 .map(query::DefHit::text)
@@ -202,7 +212,8 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-const TOOL_NAMES: [&str; 8] = [
+const TOOL_NAMES: [&str; 9] = [
+    "query",
     "def",
     "callers",
     "explain",
@@ -231,6 +242,16 @@ fn tools() -> Vec<Value> {
         })
     };
     vec![
+        tool(
+            "query",
+            "Plain-English question -> the matching symbols and what they call or are called by.",
+            with(&json!({
+                "question": { "type": "string" },
+                "depth": { "type": "integer", "description": "hops (default 2, max 6)" },
+                "budget": { "type": "integer", "description": "answer size in tokens (default 1000)" },
+            })),
+            &["question"],
+        ),
         tool(
             "def",
             "Where a symbol is defined (path:line signature).",
@@ -298,15 +319,18 @@ fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
 
 /// An optional whole-number argument in `1..=MAX_LIMIT`.
 fn number(args: &Value, key: &str, default: usize) -> Result<usize, String> {
+    bounded(args, key, default, MAX_LIMIT)
+}
+
+/// A whole number argument from 1 to `max`, or `default` when absent.
+fn bounded(args: &Value, key: &str, default: usize, max: usize) -> Result<usize, String> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(v) => v
             .as_u64()
             .and_then(|n| usize::try_from(n).ok())
-            .filter(|n| (1..=MAX_LIMIT).contains(n))
-            .ok_or_else(|| {
-                format!("argument `{key}` must be a whole number from 1 to {MAX_LIMIT}")
-            }),
+            .filter(|n| (1..=max).contains(n))
+            .ok_or_else(|| format!("argument `{key}` must be a whole number from 1 to {max}")),
     }
 }
 
@@ -729,5 +753,28 @@ mod tests {
         assert!(
             matches!(read_line(&mut io::Cursor::new(exact)).unwrap(), Line::Text(t) if t.len() == MAX_LINE)
         );
+    }
+
+    #[test]
+    fn the_query_tool_is_listed_bounded_and_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn one() { two(); }\npub fn two() {}\n",
+        )
+        .unwrap();
+        let mut server = Server::new(dir.path());
+        let (text, bad) = call(&mut server, "query", json!({ "question": "one" }));
+        assert!(!bad && text.starts_with("start: one"), "{text}");
+        for args in [
+            json!({ "question": "one", "depth": 0 }),
+            json!({ "question": "one", "depth": 7 }),
+            json!({ "question": "one", "budget": 0 }),
+            json!({ "question": "one", "budget": 20001 }),
+            json!({ "question": "x".repeat(MAX_ARG_LEN + 1) }),
+            json!({}),
+        ] {
+            assert!(call(&mut server, "query", args.clone()).1, "{args}");
+        }
     }
 }

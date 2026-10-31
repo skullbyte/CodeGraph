@@ -40,6 +40,19 @@ enum Command {
         #[arg(value_name = "DIR")]
         root: Option<PathBuf>,
     },
+    /// Ask in plain English: the matching symbols and what they call or are called by.
+    Query {
+        question: String,
+        /// How many hops to walk from the matching symbols.
+        #[arg(long, default_value_t = codegraph::ask::DEFAULT_DEPTH as u64, value_parser = clap::value_parser!(u64).range(1..=codegraph::ask::MAX_DEPTH as u64))]
+        depth: u64,
+        /// Answer size in tokens (a token counts as 3 characters).
+        #[arg(long, default_value_t = codegraph::ask::DEFAULT_BUDGET)]
+        budget: usize,
+        /// Walk depth-first instead of breadth-first.
+        #[arg(long)]
+        dfs: bool,
+    },
     /// Where is <name> defined?
     Def { name: String },
     /// Who calls <name>?
@@ -172,6 +185,25 @@ fn run(cli: Cli) -> Result<()> {
         Command::Index { root } => {
             let root = root.as_ref().unwrap_or(&cli.dir);
             cmd_index(root)
+        }
+        Command::Query {
+            question,
+            depth,
+            budget,
+            dfs,
+        } => {
+            let opts = codegraph::ask::Options {
+                depth: *depth as usize,
+                budget: *budget,
+                dfs: *dfs,
+            };
+            let answer = codegraph::ask::query(&load(&cli.dir)?, question, &opts);
+            if cli.json {
+                println!("{}", serde_json::to_string(&answer)?);
+            } else {
+                answer.lines().iter().for_each(|line| println!("{line}"));
+            }
+            Ok(())
         }
         Command::Def { name } => print_results(
             &semantic::def_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name),
