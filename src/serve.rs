@@ -17,6 +17,7 @@ use crate::index;
 use crate::model::Index;
 use crate::query;
 use crate::semantic;
+use crate::tour;
 
 /// A longer line (line ending included) is refused: a client cannot make the server buffer
 /// unbounded input. JSON-RPC batches (an array) are not supported; 2025-06-18 removed them.
@@ -111,6 +112,7 @@ impl Server {
     fn run_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let limit = number(args, "limit", DEFAULT_LIMIT)?;
         let store = self.store_for(name);
+        let root = self.root.clone();
         let loaded = self.loaded()?;
         let index = &loaded.index;
         let lines: Vec<String> = match name {
@@ -122,6 +124,15 @@ impl Server {
                 };
                 ask::query(index, text(args, "question")?, &opts).lines()
             }
+            "tour" => tour::tour(
+                &root,
+                index,
+                bounded(args, "top", tour::DEFAULT_TOP, tour::MAX_TOP)?,
+            )
+            .iter()
+            .enumerate()
+            .map(|(n, stop)| stop.text(n + 1))
+            .collect(),
             "def" => semantic::def_with(index, &store, text(args, "name")?)
                 .iter()
                 .map(query::DefHit::text)
@@ -212,8 +223,9 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-const TOOL_NAMES: [&str; 9] = [
+const TOOL_NAMES: [&str; 10] = [
     "query",
+    "tour",
     "def",
     "callers",
     "explain",
@@ -251,6 +263,14 @@ fn tools() -> Vec<Value> {
                 "budget": { "type": "integer", "description": "answer size in tokens (default 1000)" },
             })),
             &["question"],
+        ),
+        tool(
+            "tour",
+            "Reading order for the project: entry files, then the key file of each cluster.",
+            with(
+                &json!({ "top": { "type": "integer", "description": "how many files (default 10)" } }),
+            ),
+            &[],
         ),
         tool(
             "def",
@@ -776,5 +796,25 @@ mod tests {
         ] {
             assert!(call(&mut server, "query", args.clone()).1, "{args}");
         }
+    }
+
+    #[test]
+    fn the_tour_tool_is_listed_bounded_and_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let mut server = Server::new(dir.path());
+        let (text, bad) = call(&mut server, "tour", json!({}));
+        assert!(!bad && text.starts_with("1. main.rs"), "{text}");
+        for args in [json!({ "top": 0 }), json!({ "top": 51 })] {
+            assert!(call(&mut server, "tour", args.clone()).1, "{args}");
+        }
+        let listed = ask(&mut server, "tools/list", Value::Null);
+        assert!(
+            listed["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "tour")
+        );
     }
 }

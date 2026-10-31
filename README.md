@@ -8,6 +8,7 @@ fewer tokens. Rust, TypeScript/TSX, JavaScript, Python, Java, C#, Go and C/C++ a
 ```
 codegraph index [dir]        # writes .claude/codemap.md and .claude/graph.json (incremental)
 codegraph query "<question>" # plain English: matching symbols + what they call / are called by (--depth, --budget tokens, --dfs)
+codegraph tour               # reading order: entry files, then the key file of each cluster (--top N)
 codegraph def <name>         # path:line signature
 codegraph callers <name>     # path:line  in <enclosing fn>
 codegraph path <A> <B>       # shortest call chain (function names) or import chain (file paths)
@@ -39,8 +40,8 @@ Claude only saves tokens if it asks the graph instead of grepping and reading fi
 and `.claude/skills/codegraph/SKILL.md`; it never touches `~/.claude` and refuses a settings file that is not
 valid JSON. Restart Claude Code and approve the `codegraph` server when asked.
 
-- **MCP server** (`codegraph serve`, offline, no network): tools `query`, `def`, `callers`, `explain`, `path`, `affected`,
-  `hubs`, `community`, `stats`. All nine descriptions together cost about 600 tokens per session; answers
+- **MCP server** (`codegraph serve`, offline, no network): tools `query`, `tour`, `def`, `callers`, `explain`, `path`, `affected`,
+  `hubs`, `community`, `stats`. All ten descriptions together cost about 600 tokens per session; answers
   are the CLI lines, cut at 40 lines (`limit`) with `... +N more`. It reloads when the graph changes and builds
   an index by itself if there is none.
 - **Hook** (`codegraph hook search|read`): when Claude is about to grep, or read a source file, in an indexed

@@ -8,6 +8,7 @@ description: Answer "where is X defined", "who calls X" and "what depends on X" 
 This project is indexed. The `codegraph` MCP tools (or the same commands on the CLI) answer in a few lines what grep and file reads answer in many:
 
 - `query "<question>"`: when you do not know the exact name; plain words in, matching symbols and their neighbours out, cut to a token budget.
+- `tour`: where to start reading an unfamiliar project (entry files, then each cluster's key file, one line each).
 - `def <name>`: where a symbol is defined (`path:line signature`).
 - `callers <name>`: call sites, `path:line  in <calling function>`.
 - `explain <name>`: definition, callers and callees together.

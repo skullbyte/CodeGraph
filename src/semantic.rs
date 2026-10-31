@@ -405,7 +405,7 @@ fn list_checked(root: &Path, rel: &str) -> Result<Vec<String>> {
 }
 
 /// Without control characters (a newline would fake an extra result line), trimmed, cut to the cap.
-fn clean(name: &str) -> String {
+pub(crate) fn clean(name: &str) -> String {
     let hidden = |c: char| {
         c.is_control()
             || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}')

@@ -53,6 +53,12 @@ enum Command {
         #[arg(long)]
         dfs: bool,
     },
+    /// A reading order for the project: entry files, then the key file of each cluster.
+    Tour {
+        /// How many files to list.
+        #[arg(long, default_value_t = codegraph::tour::DEFAULT_TOP)]
+        top: usize,
+    },
     /// Where is <name> defined?
     Def { name: String },
     /// Who calls <name>?
@@ -202,6 +208,17 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string(&answer)?);
             } else {
                 answer.lines().iter().for_each(|line| println!("{line}"));
+            }
+            Ok(())
+        }
+        Command::Tour { top } => {
+            let stops = codegraph::tour::tour(&cli.dir, &load(&cli.dir)?, *top);
+            if cli.json {
+                println!("{}", serde_json::to_string(&stops)?);
+            } else {
+                for (n, stop) in stops.iter().enumerate() {
+                    println!("{}", stop.text(n + 1));
+                }
             }
             Ok(())
         }

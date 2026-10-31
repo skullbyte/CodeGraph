@@ -17,5 +17,6 @@ pub mod report;
 pub mod scip;
 pub mod semantic;
 pub mod serve;
+pub mod tour;
 pub mod walk;
 pub mod watch;

@@ -519,7 +519,7 @@ fn serve_speaks_mcp_over_stdin_and_stdout() {
         .collect();
     assert_eq!(replies.len(), 3, "the notification gets no reply");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "codegraph");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 10);
     assert_eq!(
         replies[2]["result"]["content"][0]["text"],
         "src/lib.rs:3  in pub fn beta"
@@ -730,4 +730,16 @@ fn query_answers_a_plain_english_question() {
             .status
             .success()
     );
+}
+
+#[test]
+fn tour_lists_a_reading_order() {
+    let dir = project();
+    assert!(run(dir.path(), &["index"]).status.success());
+    let out = stdout(&run(dir.path(), &["tour", "--top", "3"]));
+    assert!(out.starts_with("1. "), "{out}");
+    assert!(out.lines().count() <= 3, "{out}");
+    let json = stdout(&run(dir.path(), &["--json", "tour"]));
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(v[0]["path"].is_string());
 }
