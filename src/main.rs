@@ -535,6 +535,7 @@ fn print_pending(p: &semantic::Pending) {
         )
     };
     println!("{} docs, {} lines: {plan}", p.docs.len(), p.total_lines);
+    println!("{}", semantic::advice(p.total_lines));
     for (n, chunk) in p.chunks.iter().enumerate() {
         println!("chunk {}: {}", n + 1, chunk.join(" "));
     }

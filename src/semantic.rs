@@ -92,6 +92,27 @@ pub struct Summary {
     pub dropped: usize,
 }
 
+/// Rough Claude tokens to read `lines` lines of docs once (about 12 tokens a line).
+pub fn read_tokens(lines: usize) -> usize {
+    lines * 12
+}
+
+/// One sentence telling the user whether the AI pass is likely worth its tokens.
+pub fn advice(total_lines: usize) -> String {
+    let tokens = read_tokens(total_lines);
+    if total_lines == 0 {
+        "advice: nothing to read".to_string()
+    } else if total_lines < INLINE_MAX_LINES {
+        format!(
+            "advice: skip the AI pass. Reading these docs directly costs ~{tokens} Claude tokens once; the pass costs about the same and only pays back if you will ask many questions about them. The free layer already indexes headings, links and `code` mentions"
+        )
+    } else {
+        format!(
+            "advice: the pass costs ~{tokens} Claude tokens once (reading) plus the JSON it writes; it pays back when the docs are long and you will keep asking about them. Use --max-lines to try a part first"
+        )
+    }
+}
+
 pub fn store_path(root: &Path) -> PathBuf {
     root.join(".claude").join("semantic.json")
 }
@@ -942,5 +963,15 @@ mod tests {
         assert_eq!(cut_text("aéb".to_string(), 2), "a");
         assert_eq!(cut_text("aéb".to_string(), 3), "aé");
         assert_eq!(cut_text("ab".to_string(), 10), "ab");
+    }
+
+    #[test]
+    fn advice_says_skip_for_small_doc_sets_and_gives_the_cost_for_big_ones() {
+        assert_eq!(read_tokens(100), 1200);
+        let small = advice(400);
+        assert!(small.contains("skip") && small.contains("~4800"), "{small}");
+        let big = advice(8000);
+        assert!(big.contains("~96000") && !big.contains("skip"), "{big}");
+        assert!(advice(0).contains("nothing"), "{}", advice(0));
     }
 }
