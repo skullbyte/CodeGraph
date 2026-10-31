@@ -4,7 +4,8 @@
 Goal: Phase 7 (documents in the graph, token-cheap at any size). Plan: ~/.claude/plans/foamy-enchanting-turing.md (approved 2026-10-31).
 State: Phases 1-6 done and installed here (binary in ~/.local/bin, `.mcp.json`, hooks, skill; SCIP imported, `just scip` refreshes it). Phase 7 step 1 (free markdown scan) committed as 5f8c698 after 4 review rounds. `just check` green: 202 unit + 25 end-to-end tests. Tree clean; nothing pushed (the user pushes).
 Steps 1-3 committed (step 2 = af132a0; step 3 = skill `codegraph-docs` in `src/skill-docs.md`, `install`/`uninstall` now loop over a SKILLS table; both reviewed, "no remaining issues"). `just check` green: 220 unit + 27 e2e. Not yet re-run `codegraph install` here, so this repo's own `.claude/skills/codegraph-docs` does not exist until the binary is reinstalled.
-Step 4 done (PDFs, user approved the crate `pdf-extract`; committed). Next step: step 5: real numbers (a semantic pass on this repo's docs, token cost), final review, commit by file name.
+Step 4 done (PDFs, user approved the crate `pdf-extract`; committed). Phase 7 done except the final wrap-up commit. Step 5 run on this repo (inline, 5 docs): 18 concepts, 13 links, 0 dropped; cost to Claude ~8k tokens (about 6k reading 220 lines of docs, ~1.5k writing the JSON); `docs pending` right after lists only the doc added since (`src/skill-docs.md`). `codegraph install` re-run here (binary via `cargo install --path .`): skills `codegraph` and `codegraph-docs`; `.claude/semantic.json` is git-ignored.
+Next step: user picks (Part B order, or the open tokio update 19-21 ms).
 
 ## Checklist
 - [x] Phase 1 (A.1) core engine: Rust + TS/TSX extraction, walker, parallel incremental index, codemap/graph.json/graph.bin, index/update/watch/def/callers/explain/path/affected/hubs, tsconfig aliases, benchmarks (done 2026-10-27)
@@ -13,10 +14,10 @@ Step 4 done (PDFs, user approved the crate `pdf-extract`; committed). Next step:
 - [x] Phase 4 (A.4) More languages: Rust, TS/TSX, JS, Python, Java, C#, Go, C/C++ (plan in ~/.claude/plans/glowing-skipping-mountain.md)
 - [~] Phase 5 (A.5) Precision (committed; checked on real indexes: this repo, pizzeria and tokio, numbers in Decisions): SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
 - [x] Phase 6 (A.6) Claude Code integration: MCP server (`serve`), hook, skill, `install`/`uninstall`; installed here 2026-10-31 (binary symlinked to ~/.local/bin), MCP tools `def`/`stats` verified live after restart; hook nudge observed; `install` replaced the codemap.sh SessionStart hook, re-added by hand (re-check after any reinstall); SCIP imported here (6029 of 6212 calls), refresh with `just scip`
-- [~] Phase 7 (A.7) Documents (plan: ~/.claude/plans/foamy-enchanting-turing.md; token-cheap at any size)
+- [x] Phase 7 (A.7) Documents (plan: ~/.claude/plans/foamy-enchanting-turing.md; token-cheap at any size)
   - [x] step 1: free markdown scan (`src/lang/markdown.rs`: headings, doc links, `code` mentions; `Kind::Heading`; docs never count as code: `graph_calls()` empty for docs, `Kind::is_code_def`, `callers` lists `[doc]` mentions only for names with one code definition); reviewed (4 rounds, "no remaining issues"), committed
   - [x] step 2: `codegraph docs pending|ingest` + `.claude/semantic.json` store (AI pass, spends Claude tokens, cached by hash) (store, pending, ingest, queries read the store; reviewed)
-  - [x] step 3: skill `codegraph-docs` (installed by `install`); [x] step 4: PDFs (`pdf-extract`; `docs text <file>` prints locally extracted text; 10 s timeout, 64 MB-stack thread, 20 MB cap); [ ] step 5: review loop, numbers, commit
+  - [x] step 3: skill `codegraph-docs` (installed by `install`); [x] step 4: PDFs (`pdf-extract`; `docs text <file>` prints locally extracted text; 10 s timeout, 64 MB-stack thread, 20 MB cap); [x] step 5: numbers, README, install here
 - [ ] Part B: full Graphify parity (order chosen by the user later)
 - [ ] Open: update on tokio is ~19-21 ms (target < 20 ms); `docs/REQUIREMENTS.md` Part A/B is the source of truth for scope
 
@@ -31,8 +32,8 @@ Compared on 2026-10-28 against Graphify 0.9.97 (source: see CLAUDE.md). `G/` = g
 | Analysis (communities, god nodes, surprising links, cohesion, suggested questions, dedup, resolution passes, incremental cache, rcfile, query log, security caps, validate) | 5 / 12 | 42% |
 | Web view features | 11 / 16 | 69% |
 | Languages (Graphify has ~45 extractors) | 9 / 45 (Rust, TS/TSX, JS, Python, Java, C#, Go, C, C++) | 20% |
-| Ingest / semantic (docs, PDF, images, audio, Google, Postgres, manifest, URL, LLM pass) | 0 / 9 | 0% |
-| **Total** | **36 / 118** | **~31%** |
+| Ingest / semantic (docs, PDF, images, audio, Google, Postgres, manifest, URL, LLM pass) | 3 / 9 (markdown scan, PDF text, LLM pass via skill; ours is Claude-Code-only, no API key) | 33% |
+| **Total** | **39 / 118** | **~33%** |
 
 ### Provenance: did we read Graphify's code first?
 - Followed its source: communities (`cluster.py`: Louvain idea, cohesion, both split rules), report (`report.py`: surprising links), web view features (`exporters/html.py`).

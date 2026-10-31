@@ -20,6 +20,9 @@ codegraph mermaid <name>     # Mermaid flowchart of what <name> calls (--depth N
 codegraph obsidian           # writes an Obsidian vault to .claude/obsidian (--out DIR); notes of deleted files are not removed
 codegraph scip [index.scip]  # makes callers/hubs/communities exact from a SCIP index (see below)
 codegraph benchmark          # vs Graphify (if installed): index time + explain answers (--name X, repeatable)
+codegraph docs pending       # docs Claude has not read yet (new or changed), with the plan (--max-lines N)
+codegraph docs ingest <json> # validate and store what an agent found in one doc
+codegraph docs text <doc>    # text of a doc; PDFs are read locally (cheap in tokens)
 codegraph watch [dir]        # index, then keep the index fresh as files change (--interval-ms)
 ```
 Add `--json` for JSON output and `--dir <root>` to point at another project.
@@ -43,6 +46,14 @@ valid JSON. Restart Claude Code and approve the `codegraph` server when asked.
   project it adds one sentence saying the tools exist. At most 3 times per agent per session
   (`CODEGRAPH_HOOK_NUDGES=0` turns it off) and it never blocks a tool call.
 - `install` also swaps an old `codemap.sh` session-start line for `codegraph index`.
+
+## Documents (optional, spends Claude tokens)
+Markdown docs are indexed for free on every `codegraph index`: headings, links between docs and
+`code` mentions (shown as `[doc]` in `callers`). For more, ask Claude to "index the docs": the
+`codegraph-docs` skill reads only the docs that are new or changed, stores the concepts and the
+code they explain in `.claude/semantic.json` (cached by file hash, kept when the binary is rebuilt),
+and `def`, `callers` and `explain` then show `[concept]` and `[doc]` lines. Small jobs run in the main
+conversation, big ones in Sonnet subagents of about 6000 lines. Files named like secrets are never offered.
 
 ## Exact calls with SCIP (optional)
 By default `callers` matches calls by name. A SCIP index, written by the language's own compiler

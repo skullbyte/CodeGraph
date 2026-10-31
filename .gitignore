@@ -7,6 +7,8 @@ HANDOFF.md
 .claude/graph.bin
 .claude/graph.lock
 .claude/graph.html
+.claude/semantic.json
+.claude/docs-*.json
 # third-party design skill (Impeccable), reinstallable
 .claude/skills/impeccable/
 .claude/agents/impeccable-*.md
