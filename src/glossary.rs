@@ -13,8 +13,8 @@ const MAX_TERMS: usize = 4;
 /// Only this many hits of one answer are taught (each reads part of a file).
 const MAX_TAUGHT: usize = 10;
 
-/// One row per (language group, word). Groups: rust, ts (also JS), py, go, java, cs, c (also C++).
-const TABLE: [(&str, &str, &str); 63] = [
+/// One row per (language group, word). Groups: rust, ts (also JS), py, go, java, kt, cs, c (also C++).
+const TABLE: [(&str, &str, &str); 68] = [
     ("rust", "pub", "visible outside its module"),
     (
         "rust",
@@ -92,6 +92,11 @@ const TABLE: [(&str, &str, &str); 63] = [
     ("c", "struct", "a record with named fields"),
     ("c", "typedef", "a new name for a type"),
     ("c", "class", "a blueprint for objects"),
+    ("kt", "fun", "a function"),
+    ("kt", "val", "a name whose value never changes"),
+    ("kt", "var", "a name whose value can change"),
+    ("kt", "object", "a class with exactly one instance"),
+    ("kt", "override", "replaces a method of the parent"),
     ("c", "template", "code that works for many types"),
     ("c", "*", "a pointer: the address of a value"),
 ];
@@ -103,6 +108,7 @@ fn group_of(path: &str) -> Option<&'static str> {
         "py" => Some("py"),
         "go" => Some("go"),
         "java" => Some("java"),
+        "kt" | "kts" => Some("kt"),
         "cs" => Some("cs"),
         "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" => Some("c"),
         _ => None,
@@ -397,6 +403,10 @@ mod tests {
         assert_eq!(
             words("public static void main()", "A.java"),
             ["public", "static", "void"]
+        );
+        assert_eq!(
+            words("override fun run(): Unit", "A.kt"),
+            ["override", "fun"]
         );
         assert_eq!(
             words("static int f(const char *s)", "a.c"),

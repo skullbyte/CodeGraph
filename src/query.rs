@@ -264,6 +264,7 @@ fn resolve_import<V>(
         Some(Lang::Rust) => resolve_rust_module(files, from, imp),
         Some(Lang::Python) => resolve_python_module(files, from, imp),
         Some(Lang::Java) => resolve_java_class(files, imp),
+        Some(Lang::Kotlin) => resolve_kotlin_class(files, imp),
         Some(Lang::C | Lang::Cpp | Lang::Header | Lang::Markdown) => {
             resolve_include(files, from, imp)
         }
@@ -354,6 +355,12 @@ fn resolve_python_module<V>(files: &BTreeMap<String, V>, from: &str, imp: &str) 
 fn resolve_java_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<String> {
     let path = format!("{}.java", imp.replace('.', "/"));
     single_suffix_match(files, &[path])
+}
+
+/// Kotlin class `a.b.C` -> the file `a/b/C.kt`, wherever the source root is (a `.kts` script too).
+fn resolve_kotlin_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<String> {
+    let base = imp.replace('.', "/");
+    single_suffix_match(files, &[format!("{base}.kt"), format!("{base}.kts")])
 }
 
 /// `#include "x.h"`: next to the including file first, else the one project file with that path.
@@ -1030,6 +1037,26 @@ mod tests {
             2
         );
         assert_eq!(local_imports(&index, &index.files[from]).len(), 2);
+    }
+
+    #[test]
+    fn kotlin_imports_resolve_under_any_source_root() {
+        let index = index_of(&[
+            (
+                "src/main/kotlin/app/Store.kt",
+                "package app\nimport com.shop.Cart\nimport com.shop.*\nimport kotlin.collections.List\nclass Store\n",
+            ),
+            (
+                "src/main/kotlin/com/shop/Cart.kt",
+                "package com.shop\nclass Cart\n",
+            ),
+        ]);
+        let from = "src/main/kotlin/app/Store.kt";
+        assert_eq!(
+            path(&index, from, "src/main/kotlin/com/shop/Cart.kt").len(),
+            2
+        );
+        assert_eq!(local_imports(&index, &index.files[from]).len(), 1);
     }
 
     #[test]

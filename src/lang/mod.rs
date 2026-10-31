@@ -5,6 +5,7 @@ pub mod csharp;
 pub mod generic;
 pub mod golang;
 pub mod java;
+pub mod kotlin;
 pub mod markdown;
 pub mod python;
 pub mod rust;
@@ -35,6 +36,7 @@ pub enum Lang {
     Java,
     CSharp,
     Go,
+    Kotlin,
     C,
     Cpp,
     /// `.h`: tried as C first (K&R functions, C++ keywords as names), as C++ when that fails.
@@ -56,6 +58,7 @@ impl Lang {
             "java" => Some(Lang::Java),
             "cs" => Some(Lang::CSharp),
             "go" => Some(Lang::Go),
+            "kt" | "kts" => Some(Lang::Kotlin),
             "c" => Some(Lang::C),
             "h" => Some(Lang::Header),
             "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Lang::Cpp),
@@ -74,6 +77,7 @@ impl Lang {
             Lang::Java => tree_sitter_java::LANGUAGE.into(),
             Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
+            Lang::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
             Lang::C | Lang::Header => tree_sitter_c::LANGUAGE.into(),
             Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Lang::Tsx | Lang::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
@@ -110,6 +114,7 @@ pub fn extract(lang: Lang, src: &str) -> Result<Facts> {
         Lang::Java => java::extract(tree.root_node(), src),
         Lang::CSharp => csharp::extract(tree.root_node(), src),
         Lang::Go => golang::extract(tree.root_node(), src),
+        Lang::Kotlin => kotlin::extract(tree.root_node(), src),
         Lang::C | Lang::Cpp | Lang::Header => c::extract(tree.root_node(), src),
         Lang::Markdown => markdown::extract(src),
     };
