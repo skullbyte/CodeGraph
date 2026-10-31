@@ -3,6 +3,7 @@ Fast offline code-graph CLI in Rust: lets AI agents ask "where is X / who calls 
 
 ## Commands
 - Check all (run before saying you're done): `just check`
+- Refresh exact call data: `just scip` (run it after code changes, before using the codegraph MCP tools to answer; `cargo install --path .` first if the binary changed)
 - Test: `just test` · one test: `cargo test <name>`
 - Lint: `just lint` · Format: `just fmt`
 - Run: `cargo run -- <args>` · Build: `cargo build`
@@ -37,7 +38,7 @@ Fast offline code-graph CLI in Rust: lets AI agents ask "where is X / who calls 
 - Non-trivial change: plan first (plan mode), then small steps.
 - New behaviour or bug: write the failing test first, see it fail, then write the code.
 - Noisy test output → `test-runner` subagent; a tiny suite can run directly.
-- Searches: codemap first, then `explorer`. Before commit: `code-reviewer`; run it once per finished feature, not after every small fix.
+- Searches: codemap first, then `explorer`. Before every commit: `code-reviewer` (model sonnet), fix real findings, then run it again, and repeat until it says "no remaining issues" (tell the reviewer to answer with exactly that phrase); once per finished feature, not after every small fix.
 - Context > 50% on unfinished work: /handoff, then /clear.
 
 ## Git

@@ -19,3 +19,7 @@ fmt-rs:
 fmt-check-rs:
     cargo fmt --all --check
 
+# Refresh exact call data (SCIP) after code changes; needs rust-analyzer and an installed codegraph
+scip:
+    rust-analyzer scip .
+    codegraph scip

@@ -19,7 +19,7 @@ Next step: stop for the user OK, then Phase 5 (A.5): import SCIP from rust-analy
   - [x] C# (src/lang/csharp.rs) and Go (src/lang/golang.rs): no import edges (namespace / package, not a file); link through calls only
   - [x] C/C++ (src/lang/c.rs, one table; `.h` tried as C, then C++ if that has errors; typedefs give every name)
 - [~] Phase 5 (A.5) Precision (committed; checked on real indexes: this repo, pizzeria and tokio, numbers in Decisions): SCIP import (rust-analyzer, scip-typescript); fixes name-based matching, e.g. `Some(x)` vs real calls and same-named methods
-- [~] Phase 6 (A.6) Claude Code integration: MCP server (`serve`), hook, skill, `install`/`uninstall` written and tested; open: put the binary on PATH and run `codegraph install` here, restart Claude Code and check `/mcp` and the nudge (needs the user)
+- [x] Phase 6 (A.6) Claude Code integration: MCP server (`serve`), hook, skill, `install`/`uninstall`; installed here 2026-10-31 (binary symlinked to ~/.local/bin), MCP tools `def`/`stats` verified live after restart; hook nudge observed; `install` replaced the codemap.sh SessionStart hook, re-added by hand (re-check after any reinstall); SCIP imported here (6029 of 6212 calls), refresh with `just scip`
 - [ ] Phase 7 (A.7) Documents: semantic pass over docs/PDFs/markdown via a skill
 - [ ] Part B: full Graphify parity (order chosen by the user later)
 - [ ] Open: update on tokio is ~19-21 ms (target < 20 ms); `docs/REQUIREMENTS.md` Part A/B is the source of truth for scope

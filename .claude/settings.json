@@ -1,4 +1,53 @@
 {
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/format.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "command -v codegraph >/dev/null 2>&1 || exit 0; codegraph hook search",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|Grep"
+      },
+      {
+        "hooks": [
+          {
+            "command": "command -v codegraph >/dev/null 2>&1 || exit 0; codegraph hook read",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "Read|Glob"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "command -v codegraph >/dev/null 2>&1 || exit 0; codegraph index \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1",
+            "type": "command"
+          },
+          {
+            "command": "\"$HOME\"/.claude/bin/codemap.sh \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Bash(cargo build*)",
@@ -16,29 +65,6 @@
     "deny": [
       "Bash(git push*)",
       "Bash(rm -rf*)"
-    ]
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$HOME\"/.claude/bin/codemap.sh \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/format.sh"
-          }
-        ]
-      }
     ]
   }
 }
