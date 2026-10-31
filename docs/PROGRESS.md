@@ -3,8 +3,8 @@
 ## Now
 Goal: Phase 7 (documents in the graph, token-cheap at any size). Plan: ~/.claude/plans/foamy-enchanting-turing.md (approved 2026-10-31).
 State: Phases 1-6 done and installed here (binary in ~/.local/bin, `.mcp.json`, hooks, skill; SCIP imported, `just scip` refreshes it). Phase 7 step 1 (free markdown scan) committed as 5f8c698 after 4 review rounds. `just check` green: 202 unit + 25 end-to-end tests. Tree clean; nothing pushed (the user pushes).
-Step 2 (uncommitted, reviewed in 3 rounds, last answer "no remaining issues"; `just check` green: 217 unit + 26 e2e): `src/semantic.rs` (store, `is_sensitive`, `pending`, `ingest` with validation, `def_with`/`callers_with`/`explain_with`), `walk::list_docs`, `codegraph docs pending|ingest`; `def`/`callers`/`explain` (CLI and MCP) show `[concept]` and `[doc]` lines from the store, AMBIGUOUS hidden.
-Next step: step 3 (skill `codegraph-docs`, installed by `install`), then step 5 (numbers on real repos, commit by file name). Step 4 (PDFs) needs the user's OK before any new crate.
+Steps 1-3 committed (step 2 = af132a0; step 3 = skill `codegraph-docs` in `src/skill-docs.md`, `install`/`uninstall` now loop over a SKILLS table; both reviewed, "no remaining issues"). `just check` green: 220 unit + 27 e2e. Not yet re-run `codegraph install` here, so this repo's own `.claude/skills/codegraph-docs` does not exist until the binary is reinstalled.
+Next step: step 4 (PDFs) needs the user's OK for a new crate (`pdf-extract`); without it PDFs are listed by `docs pending` (0 lines) and the agent reads them itself. Then step 5: real numbers (a semantic pass on this repo's docs, token cost), final review, commit by file name.
 
 ## Checklist
 - [x] Phase 1 (A.1) core engine: Rust + TS/TSX extraction, walker, parallel incremental index, codemap/graph.json/graph.bin, index/update/watch/def/callers/explain/path/affected/hubs, tsconfig aliases, benchmarks (done 2026-10-27)
@@ -16,7 +16,7 @@ Next step: step 3 (skill `codegraph-docs`, installed by `install`), then step 5 
 - [~] Phase 7 (A.7) Documents (plan: ~/.claude/plans/foamy-enchanting-turing.md; token-cheap at any size)
   - [x] step 1: free markdown scan (`src/lang/markdown.rs`: headings, doc links, `code` mentions; `Kind::Heading`; docs never count as code: `graph_calls()` empty for docs, `Kind::is_code_def`, `callers` lists `[doc]` mentions only for names with one code definition); reviewed (4 rounds, "no remaining issues"), committed
   - [x] step 2: `codegraph docs pending|ingest` + `.claude/semantic.json` store (AI pass, spends Claude tokens, cached by hash) (store, pending, ingest, queries read the store; reviewed)
-  - [ ] step 3: skill `codegraph-docs`; [ ] step 4: PDFs (ask before adding a crate); [ ] step 5: review loop, numbers, commit
+  - [x] step 3: skill `codegraph-docs` (installed by `install`); [ ] step 4: PDFs (ask before adding a crate); [ ] step 5: review loop, numbers, commit
 - [ ] Part B: full Graphify parity (order chosen by the user later)
 - [ ] Open: update on tokio is ~19-21 ms (target < 20 ms); `docs/REQUIREMENTS.md` Part A/B is the source of truth for scope
 
@@ -147,3 +147,4 @@ Licence: Apache-2.0 (LICENSE) + MIT for older code (LICENSE-MIT) + NOTICE; Graph
 - 2026-10-31 Phase 7 step 1 numbers (release): tokio now 839 files (25 are .md): cold index 77 ms, cached 28 ms (was ~60 / 25); `hubs` unchanged; this repo 46 files; `callers assemble` shows its code call plus `docs/PROGRESS.md:85  in Decisions  [doc]`. Design: a heading is not a definition (would break unique-name checks), doc mentions are not calls (heading text like "Getting started" would become a fake caller), the hook still ignores reads of .md
 - 2026-10-31 user rule: never call AI passes "paid"; codegraph is free, the AI layer spends Claude tokens
 - 2026-10-31 Phase 7 step 2 design: ingest prunes store entries of docs that vanished or became secret-named; names lose control/bidi/zero-width chars (a newline would fake a result line); links/concepts need a line inside the doc; `docs ingest` reads at most 1 MB; the MCP loads the store only for def/callers/explain and ignores a damaged one (stderr note)
+- 2026-11-01 Phase 7 numbers (release): `docs pending` on tokio = 25 docs, 7,945 lines, 2 subagent chunks (CHANGELOGs dominate); cached index unchanged at 28 ms; this repo = 5 docs, 379 lines, inline

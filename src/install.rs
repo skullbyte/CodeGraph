@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
@@ -15,6 +15,9 @@ use serde_json::{Map, Value, json};
 use crate::index;
 
 const SKILL: &str = include_str!("skill.md");
+const SKILL_DOCS: &str = include_str!("skill-docs.md");
+/// Skills we install: folder name under `.claude/skills/` and its text.
+const SKILLS: [(&str, &str); 2] = [("codegraph", SKILL), ("codegraph-docs", SKILL_DOCS)];
 const SKILL_MARKER: &str = "<!-- codegraph-managed";
 /// Skip quietly when the binary is missing (fresh clone, CI); `exit 0` before the call keeps the
 /// hook's own exit code (2 = block) intact, unlike `&& ... || true`.
@@ -202,6 +205,10 @@ fn write_text(path: &Path, text: &str) -> Result<()> {
     index::write_atomic(path, text.as_bytes())
 }
 
+fn skill_file(root: &Path, name: &str) -> PathBuf {
+    root.join(".claude/skills").join(name).join("SKILL.md")
+}
+
 /// What is at the skill path: nothing, our file, or somebody else's (also: unreadable).
 enum Skill {
     Absent,
@@ -224,14 +231,11 @@ fn skill_at(path: &Path) -> Skill {
 pub fn install(root: &Path, print_only: bool) -> Result<Vec<String>> {
     let settings_path = root.join(".claude/settings.json");
     let mcp_path = root.join(".mcp.json");
-    let skill_path = root.join(".claude/skills/codegraph/SKILL.md");
     let in_file = |path: &Path| format!("in {}", path.display());
     let settings =
         add_to_settings(read_json(&settings_path)?).with_context(|| in_file(&settings_path))?;
     let (mcp, mcp_is_ours) =
         add_to_mcp(read_json(&mcp_path)?).with_context(|| in_file(&mcp_path))?;
-    let skill = skill_at(&skill_path);
-
     if print_only {
         return Ok(vec![
             format!(
@@ -244,8 +248,14 @@ pub fn install(root: &Path, print_only: bool) -> Result<Vec<String>> {
                 mcp_path.display(),
                 serde_json::to_string_pretty(&mcp)?
             ),
-            format!("# {}\n{SKILL}", skill_path.display()),
-        ]);
+        ]
+        .into_iter()
+        .chain(
+            SKILLS
+                .iter()
+                .map(|(name, text)| format!("# {}\n{text}", skill_file(root, name).display())),
+        )
+        .collect());
     }
     let mut done = Vec::new();
     if mcp_is_ours {
@@ -254,11 +264,15 @@ pub fn install(root: &Path, print_only: bool) -> Result<Vec<String>> {
     } else {
         done.push("kept your own `codegraph` server in .mcp.json".to_string());
     }
-    if matches!(skill, Skill::Foreign) {
-        done.push("kept your own .claude/skills/codegraph/SKILL.md".to_string());
-    } else {
-        write_text(&skill_path, SKILL)?;
-        done.push("wrote .claude/skills/codegraph/SKILL.md".to_string());
+    for (name, text) in SKILLS {
+        let rel = format!(".claude/skills/{name}/SKILL.md");
+        let path = skill_file(root, name);
+        if matches!(skill_at(&path), Skill::Foreign) {
+            done.push(format!("kept your own {rel}"));
+        } else {
+            write_text(&path, text)?;
+            done.push(format!("wrote {rel}"));
+        }
     }
     write_json(&settings_path, &settings)?;
     done.push("wrote .claude/settings.json (search/read hooks)".to_string());
@@ -291,11 +305,14 @@ pub fn uninstall(root: &Path) -> Result<Vec<String>> {
     };
     edit_json(".claude/settings.json", remove_from_settings);
     edit_json(".mcp.json", remove_from_mcp);
-    let skill_path = root.join(".claude/skills/codegraph/SKILL.md");
-    if matches!(skill_at(&skill_path), Skill::Ours) {
-        match fs::remove_file(&skill_path) {
-            Ok(()) => done.push("removed .claude/skills/codegraph/SKILL.md".to_string()),
-            Err(e) => done.push(format!("left .claude/skills/codegraph/SKILL.md alone: {e}")),
+    for (name, _) in SKILLS {
+        let rel = format!(".claude/skills/{name}/SKILL.md");
+        let path = skill_file(root, name);
+        if matches!(skill_at(&path), Skill::Ours) {
+            match fs::remove_file(&path) {
+                Ok(()) => done.push(format!("removed {rel}")),
+                Err(e) => done.push(format!("left {rel} alone: {e}")),
+            }
         }
     }
     let settings_text = fs::read_to_string(root.join(".claude/settings.json")).unwrap_or_default();
@@ -497,7 +514,7 @@ mod tests {
         .unwrap();
 
         let printed = install(dir.path(), true).unwrap();
-        assert_eq!(printed.len(), 3);
+        assert_eq!(printed.len(), 4);
         assert!(!path(".mcp.json").exists(), "--print writes nothing");
 
         install(dir.path(), false).unwrap();
@@ -515,7 +532,13 @@ mod tests {
                 .contains(SKILL_MARKER)
         );
 
+        assert!(
+            fs::read_to_string(path(".claude/skills/codegraph-docs/SKILL.md"))
+                .unwrap()
+                .contains("codegraph docs ingest")
+        );
         let report = uninstall(dir.path()).unwrap();
+        assert!(!path(".claude/skills/codegraph-docs/SKILL.md").exists());
         assert!(
             report.iter().any(|l| l.contains("SessionStart")),
             "{report:?}"
@@ -555,6 +578,19 @@ mod tests {
             !report.iter().any(|l| l.starts_with("removed")),
             "{report:?}"
         );
+    }
+
+    #[test]
+    fn a_foreign_docs_skill_is_kept_and_a_second_install_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join(".claude/skills/codegraph-docs/SKILL.md");
+        fs::create_dir_all(docs.parent().unwrap()).unwrap();
+        fs::write(&docs, "my own docs skill").unwrap();
+        install(dir.path(), false).unwrap();
+        install(dir.path(), false).unwrap();
+        assert_eq!(fs::read_to_string(&docs).unwrap(), "my own docs skill");
+        uninstall(dir.path()).unwrap();
+        assert_eq!(fs::read_to_string(&docs).unwrap(), "my own docs skill");
     }
 
     #[test]
