@@ -169,6 +169,17 @@ const DOC_SCAN_BYTES: u64 = 64 * 1024;
 /// First line of the doc comment at the top of the file, if there is one. Only regular files
 /// inside the project are opened (no symlinks, FIFOs, `..` or absolute paths).
 fn top_doc_line(root: &Path, path: &str) -> Option<String> {
+    let text = read_head(root, path)?;
+    let lines: Vec<&str> = text.lines().take(DOC_SCAN_LINES).collect();
+    let ext = path.rsplit_once('.').map_or("", |(_, e)| e);
+    let found = first_doc_text(&lines, ext == "py")?;
+    let plain = semantic::clean(&found);
+    (!plain.is_empty()).then(|| plain.chars().take(SUMMARY_CHARS).collect())
+}
+
+/// The first `DOC_SCAN_BYTES` of a project file as text, or `None` for anything that is not a plain
+/// regular file inside `root`.
+pub(crate) fn read_head(root: &Path, path: &str) -> Option<String> {
     let relative = Path::new(path);
     if !relative
         .components()
@@ -186,12 +197,7 @@ fn top_doc_line(root: &Path, path: &str) -> Option<String> {
         .take(DOC_SCAN_BYTES)
         .read_to_end(&mut bytes)
         .ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<&str> = text.lines().take(DOC_SCAN_LINES).collect();
-    let ext = path.rsplit_once('.').map_or("", |(_, e)| e);
-    let found = first_doc_text(&lines, ext == "py")?;
-    let plain = semantic::clean(&found);
-    (!plain.is_empty()).then(|| plain.chars().take(SUMMARY_CHARS).collect())
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Comments that tell tools something instead of describing the file.
@@ -201,7 +207,7 @@ const DIRECTIVES: [&str; 8] = [
 
 /// The first descriptive line of the leading comment. Python uses `#` and docstrings; every other
 /// supported language uses `//` and `/* */` (a `#` there is a preprocessor line or an attribute).
-fn first_doc_text(lines: &[&str], python: bool) -> Option<String> {
+pub(crate) fn first_doc_text(lines: &[&str], python: bool) -> Option<String> {
     let mut in_docstring = false;
     for raw in lines {
         let line = raw.trim();
