@@ -345,8 +345,7 @@ fn community_of(loaded: &mut Loaded, file: &str) -> Vec<String> {
 
 fn stats(loaded: &mut Loaded) -> Vec<String> {
     let files = loaded.index.files.len();
-    let symbols: usize = loaded.index.files.values().map(|f| f.symbols.len()).sum();
-    let calls: usize = loaded.index.files.values().map(|f| f.calls.len()).sum();
+    let (symbols, calls) = loaded.index.code_totals();
     let resolved: usize = loaded.index.files.values().map(|f| f.resolved.len()).sum();
     let clusters = communities(loaded).len();
     vec![format!(

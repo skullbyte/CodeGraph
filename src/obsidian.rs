@@ -85,7 +85,7 @@ fn file_note(index: &Index, path: &str, community: usize, links: &[&str]) -> Str
         .get(path)
         .map(|f| f.symbols.as_slice())
         .unwrap_or_default();
-    for s in symbols.iter().filter(|s| s.kind != Kind::Impl) {
+    for s in symbols.iter().filter(|s| s.kind.is_code_def()) {
         text.push_str(&format!(
             "- {} {} (line {})\n",
             kind_word(s.kind),

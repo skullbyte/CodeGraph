@@ -16,6 +16,7 @@ pub fn callflow(index: &Index, name: &str, depth: usize) -> String {
         .files
         .values()
         .flat_map(|f| &f.symbols)
+        .filter(|s| s.kind.is_code_def())
         .map(|s| s.name.as_str())
         .collect();
     let calls = call_edges(index);
@@ -90,6 +91,21 @@ mod tests {
     }
 
     const CHAIN: &str = "fn a() { b(); }\nfn b() { c(); }\nfn c() { println!(\"x\"); }\n";
+
+    #[test]
+    fn a_doc_heading_does_not_make_an_external_call_a_node() {
+        let mut index = index_of("fn a() { build(); }\n");
+        let doc = lang::extract(Lang::Markdown, "# build\n").unwrap();
+        index.files.insert(
+            "README.md".into(),
+            FileEntry {
+                path: "README.md".into(),
+                symbols: doc.symbols,
+                ..FileEntry::default()
+            },
+        );
+        assert!(!callflow(&index, "a", 2).contains("build"));
+    }
 
     #[test]
     fn chain_is_cut_at_depth() {

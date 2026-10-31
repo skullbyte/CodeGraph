@@ -29,15 +29,19 @@ pub struct CallerHit {
     /// Definition this call goes to (`path:line`), shown only when SCIP told several apart.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// A mention in a markdown doc (the heading it sits under), not a call.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub doc: bool,
 }
 
 impl CallerHit {
     pub fn text(&self) -> String {
         let caller = self.caller.as_deref().unwrap_or("(top level)");
         let base = format!("{}:{}  in {caller}", self.path, self.line);
-        match &self.target {
-            Some(target) => format!("{base}  -> {target}"),
-            None => base,
+        match (&self.target, self.doc) {
+            (Some(target), _) => format!("{base}  -> {target}"),
+            (None, true) => format!("{base}  [doc]"),
+            (None, false) => base,
         }
     }
 }
@@ -68,7 +72,9 @@ pub fn def(index: &Index, name: &str) -> Vec<DefHit> {
             .flat_map(|f| {
                 f.symbols
                     .iter()
-                    .filter(move |s| s.name == name && (s.kind == Kind::Impl) == impls)
+                    .filter(move |s| {
+                        s.name == name && s.kind != Kind::Heading && (s.kind == Kind::Impl) == impls
+                    })
                     .map(|s| DefHit {
                         path: f.path.clone(),
                         line: s.line,
@@ -97,6 +103,7 @@ pub fn callers(index: &Index, name: &str) -> Vec<CallerHit> {
                         Some(Resolution::Def { path, line }) => Some(format!("{path}:{line}")),
                         _ => None,
                     },
+                    doc: false,
                 })
         })
         .collect();
@@ -105,7 +112,33 @@ pub fn callers(index: &Index, name: &str) -> Vec<CallerHit> {
     if definitions.len() < 2 {
         hits.iter_mut().for_each(|h| h.target = None);
     }
+    hits.extend(doc_mentions(index, name));
     hits
+}
+
+/// Where docs mention `name` in `code`, listed only when the code defines it exactly once
+/// (Graphify's unique-match rule): an ambiguous name could point at any of its definitions.
+fn doc_mentions(index: &Index, name: &str) -> Vec<CallerHit> {
+    if definition_counts(index).get(name).copied() != Some(1) {
+        return Vec::new();
+    }
+    index
+        .files
+        .values()
+        .filter(|f| f.is_doc())
+        .flat_map(|f| {
+            f.calls
+                .iter()
+                .filter(|c| c.callee == name)
+                .map(|c| CallerHit {
+                    path: f.path.clone(),
+                    line: c.line,
+                    caller: c.caller.clone(),
+                    target: None,
+                    doc: true,
+                })
+        })
+        .collect()
 }
 
 /// Shortest chain from `from` to `to`. Two indexed file paths are linked by imports;
@@ -231,7 +264,9 @@ fn resolve_import<V>(
         Some(Lang::Rust) => resolve_rust_module(files, from, imp),
         Some(Lang::Python) => resolve_python_module(files, from, imp),
         Some(Lang::Java) => resolve_java_class(files, imp),
-        Some(Lang::C | Lang::Cpp | Lang::Header) => resolve_include(files, from, imp),
+        Some(Lang::C | Lang::Cpp | Lang::Header | Lang::Markdown) => {
+            resolve_include(files, from, imp)
+        }
         _ => resolve_ts_import(files, aliases, from, imp),
     }
 }
@@ -480,7 +515,7 @@ impl Hub {
 fn locations(index: &Index) -> HashMap<&str, String> {
     let mut map = HashMap::new();
     for file in index.files.values() {
-        for s in file.symbols.iter().filter(|s| s.kind != Kind::Impl) {
+        for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
             map.entry(s.name.as_str())
                 .or_insert_with(|| format!("{}:{}", file.path, s.line));
         }
@@ -612,7 +647,7 @@ pub fn hubs(index: &Index, top: usize) -> Vec<Hub> {
                 let at = own
                     .symbols
                     .iter()
-                    .filter(|s| s.name == name && s.kind != Kind::Impl && s.line <= line)
+                    .filter(|s| s.name == name && s.kind.is_code_def() && s.line <= line)
                     .map(|s| s.line)
                     .max()?;
                 Some((name.to_string(), Some((own.path.clone(), at))))
@@ -695,7 +730,7 @@ fn scip_family(path: &str) -> String {
 fn definition_counts(index: &Index) -> HashMap<&str, usize> {
     let mut counts = HashMap::new();
     for file in index.files.values() {
-        for s in file.symbols.iter().filter(|s| s.kind != Kind::Impl) {
+        for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
             *counts.entry(s.name.as_str()).or_default() += 1;
         }
     }
@@ -741,6 +776,35 @@ mod tests {
         assert_eq!(find("y"), Some("b/y/mod.rs".to_string()));
         assert_eq!(find("z"), None);
         assert_eq!(find("w"), None);
+    }
+
+    #[test]
+    fn docs_never_count_as_code() {
+        let index = index_of(&[
+            ("a.rs", "pub fn foo() {}\npub fn bar() { foo(); }\n"),
+            (
+                "README.md",
+                "# foo\n\n## Usage\nCall `foo()` and `nothing_here`.\nSee `bar`.\n",
+            ),
+        ]);
+        // A heading is not a definition.
+        assert_eq!(def(&index, "foo").len(), 1);
+        assert_eq!(definition_counts(&index)["foo"], 1);
+        // A doc mention is listed and marked, only for a name with one code definition.
+        let got: Vec<_> = callers(&index, "foo").iter().map(CallerHit::text).collect();
+        assert_eq!(
+            got,
+            vec!["a.rs:2  in pub fn bar", "README.md:4  in Usage  [doc]"]
+        );
+        assert!(callers(&index, "nothing_here").is_empty());
+        // And it stays out of the code graph.
+        assert!(!call_edges(&index).contains_key("Usage"));
+        let hit: Vec<_> = affected(&index, "foo", None)
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(hit, vec!["bar"]);
+        assert!(hubs(&index, 10).iter().all(|h| h.name != "Usage"));
     }
 
     #[test]

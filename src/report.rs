@@ -31,7 +31,7 @@ pub fn render(project: &str, index: &Index) -> (String, usize) {
         .enumerate()
         .map(|(i, f)| (f.as_str(), i))
         .collect();
-    let symbols: usize = index.files.values().map(|f| f.symbols.len()).sum();
+    let (symbols, _) = index.code_totals();
     let mut out = format!("# Graph Report - {project}\n\n## Summary\n");
     let _ = writeln!(
         out,

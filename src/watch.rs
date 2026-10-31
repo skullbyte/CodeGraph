@@ -67,12 +67,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_sees_only_indexable_files() {
+    fn snapshot_sees_only_indexable_files_docs_included() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
         fs::write(dir.path().join("notes.md"), "x").unwrap();
         let snap = snapshot(dir.path()).unwrap();
-        assert_eq!(snap.keys().collect::<Vec<_>>(), vec!["a.rs"]);
+        assert_eq!(snap.keys().collect::<Vec<_>>(), vec!["a.rs", "notes.md"]);
         assert_eq!(snap["a.rs"].1, 9);
     }
 

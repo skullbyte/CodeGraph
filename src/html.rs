@@ -74,7 +74,7 @@ pub fn render(project: &str, index: &Index) -> (String, usize) {
             symbols: index.files.get(path).map_or_else(Vec::new, |file| {
                 file.symbols
                     .iter()
-                    .filter(|s| s.kind != Kind::Impl)
+                    .filter(|s| s.kind.is_code_def())
                     .map(|s| SymbolData {
                         name: &s.name,
                         kind: s.kind,

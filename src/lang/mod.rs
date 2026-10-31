@@ -5,6 +5,7 @@ pub mod csharp;
 pub mod generic;
 pub mod golang;
 pub mod java;
+pub mod markdown;
 pub mod python;
 pub mod rust;
 pub mod typescript;
@@ -38,6 +39,8 @@ pub enum Lang {
     Cpp,
     /// `.h`: tried as C first (K&R functions, C++ keywords as names), as C++ when that fails.
     Header,
+    /// Docs: no grammar, a hand-written line scanner (`markdown.rs`).
+    Markdown,
 }
 
 impl Lang {
@@ -57,12 +60,14 @@ impl Lang {
             "h" => Some(Lang::Header),
             "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Lang::Cpp),
             "js" | "jsx" | "mjs" | "cjs" => Some(Lang::JavaScript),
+            "md" | "mdx" | "markdown" | "qmd" => Some(Lang::Markdown),
             _ => None,
         }
     }
 
-    fn grammar(self) -> Language {
-        match self {
+    /// `None` for languages without a tree-sitter grammar (markdown).
+    fn grammar(self) -> Option<Language> {
+        Some(match self {
             Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
@@ -72,19 +77,23 @@ impl Lang {
             Lang::C | Lang::Header => tree_sitter_c::LANGUAGE.into(),
             Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Lang::Tsx | Lang::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        }
+            Lang::Markdown => return None,
+        })
     }
 }
 
 /// Parse `src` and pull out its symbols, imports and calls.
 pub fn extract(lang: Lang, src: &str) -> Result<Facts> {
+    let Some(grammar) = lang.grammar() else {
+        return Ok(markdown::extract(src));
+    };
     let mut parser = Parser::new();
-    parser.set_language(&lang.grammar())?;
+    parser.set_language(&grammar)?;
     let mut tree = parser
         .parse(src, None)
         .ok_or_else(|| anyhow!("parser gave no tree"))?;
     if lang == Lang::Header && tree.root_node().has_error() {
-        parser.set_language(&Lang::Cpp.grammar())?;
+        parser.set_language(&tree_sitter_cpp::LANGUAGE.into())?;
         if let Some(cpp) = parser
             .parse(src, None)
             .filter(|t| !t.root_node().has_error())
@@ -102,6 +111,7 @@ pub fn extract(lang: Lang, src: &str) -> Result<Facts> {
         Lang::CSharp => csharp::extract(tree.root_node(), src),
         Lang::Go => golang::extract(tree.root_node(), src),
         Lang::C | Lang::Cpp | Lang::Header => c::extract(tree.root_node(), src),
+        Lang::Markdown => markdown::extract(src),
     };
     facts.imports.sort();
     facts.imports.dedup();

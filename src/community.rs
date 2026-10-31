@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use crate::model::{Index, Kind, Resolution};
+use crate::model::{Index, Resolution};
 use crate::query;
 
 /// Undirected, weighted graph of files; `edges` keys are `(i, j)` with `i < j`.
@@ -43,7 +43,7 @@ pub fn call_sites(index: &Index, files: &[String]) -> Vec<CallSite> {
         for s in index.files[file]
             .symbols
             .iter()
-            .filter(|s| s.kind != Kind::Impl)
+            .filter(|s| s.kind.is_code_def())
         {
             let home = homes.entry(s.name.as_str()).or_default();
             if !home.contains(&i) {

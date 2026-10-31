@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::lang::Lang;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     Fn,
@@ -16,6 +18,15 @@ pub enum Kind {
     Class,
     Interface,
     Const,
+    /// A markdown heading (a doc, not code; appended last so older graph.bin files still decode).
+    Heading,
+}
+
+impl Kind {
+    /// A definition in code: not an `impl` block (only a container) and not a doc heading.
+    pub fn is_code_def(self) -> bool {
+        !matches!(self, Kind::Impl | Kind::Heading)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,11 +78,18 @@ pub enum Resolution {
 impl FileEntry {
     /// The calls that belong in the graph, each with SCIP's answer if there is one. Calls the
     /// compiler put outside the project (standard library, dependencies) are left out.
+    /// A doc's mentions are not calls: the code graph (hubs, paths, communities) never sees them.
     pub fn graph_calls(&self) -> impl Iterator<Item = (&Call, Option<&Resolution>)> {
-        self.calls.iter().enumerate().filter_map(|(i, call)| {
+        let doc = self.is_doc();
+        self.calls.iter().enumerate().filter_map(move |(i, call)| {
             let target = self.resolution(i);
-            (target != Some(&Resolution::External)).then_some((call, target))
+            (!doc && target != Some(&Resolution::External)).then_some((call, target))
         })
+    }
+
+    /// A markdown file: headings and mentions, no code.
+    pub fn is_doc(&self) -> bool {
+        Lang::from_path(&self.path) == Some(Lang::Markdown)
     }
 
     /// SCIP's answer for the call at position `call`, if `codegraph scip` gave one.
@@ -116,6 +134,25 @@ mod tests {
     }
 
     #[test]
+    fn code_totals_leave_out_docs() {
+        let doc = crate::lang::extract(Lang::Markdown, "# T\n`run()`\n").unwrap();
+        let code = crate::lang::extract(Lang::Rust, "fn run() { run(); }\n").unwrap();
+        let mut index = Index::default();
+        for (path, facts) in [("a.rs", &code), ("R.md", &doc)] {
+            index.files.insert(
+                path.into(),
+                FileEntry {
+                    path: path.into(),
+                    symbols: facts.symbols.clone(),
+                    calls: facts.calls.clone(),
+                    ..FileEntry::default()
+                },
+            );
+        }
+        assert_eq!(index.code_totals(), (1, 1));
+    }
+
+    #[test]
     fn graphs_without_resolutions_still_load() {
         let old = r#"{"path":"a.rs","hash":"h","lines":1,"symbols":[],"imports":[],"calls":[]}"#;
         let entry: FileEntry = serde_json::from_str(old).unwrap();
@@ -134,4 +171,22 @@ pub struct Index {
     /// TypeScript import aliases from tsconfig.json: prefix -> folder, e.g. `"@/"` -> `"src/"`.
     pub aliases: BTreeMap<String, String>,
     pub files: BTreeMap<String, FileEntry>,
+}
+
+impl Index {
+    /// `(symbols, calls)` of the code only: doc headings and mentions are not counted.
+    pub fn code_totals(&self) -> (usize, usize) {
+        let mut totals = (0, 0);
+        for file in self.files.values() {
+            totals.0 += file
+                .symbols
+                .iter()
+                .filter(|s| s.kind != Kind::Heading)
+                .count();
+            if !file.is_doc() {
+                totals.1 += file.calls.len();
+            }
+        }
+        totals
+    }
 }

@@ -77,7 +77,9 @@ pub fn apply(index: &mut Index, docs: &[Document]) -> Stats {
             stats.unknown_documents += 1;
             continue;
         };
-        stats.calls += file.calls.len();
+        if !file.is_doc() {
+            stats.calls += file.calls.len();
+        }
         let mut by_line: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for (i, call) in file.calls.iter().enumerate() {
             by_line.entry(call.line).or_default().push(i);
@@ -118,7 +120,8 @@ pub fn apply(index: &mut Index, docs: &[Document]) -> Stats {
         if !covered.contains(path.as_str()) {
             // An earlier run may have covered it; this index says nothing, so forget those answers.
             file.resolved.clear();
-            if !file.calls.is_empty() {
+            // SCIP never covers docs; their mentions are not calls to resolve.
+            if !file.is_doc() && !file.calls.is_empty() {
                 stats.uncovered_files += 1;
                 stats.uncovered_calls += file.calls.len();
             }
@@ -647,6 +650,27 @@ mod tests {
         }];
         let stats = apply(&mut index, &docs);
         assert_eq!((stats.uncovered_files, stats.uncovered_calls), (1, 2));
+    }
+
+    #[test]
+    fn docs_are_never_counted_as_uncovered() {
+        let mut index = rust_index("fn run() { f(); }\n");
+        let doc =
+            crate::lang::extract(crate::lang::Lang::Markdown, "# T\n`run()` `f()`\n").unwrap();
+        index.files.insert(
+            "README.md".into(),
+            crate::model::FileEntry {
+                path: "README.md".into(),
+                calls: doc.calls,
+                ..Default::default()
+            },
+        );
+        let docs = [Document {
+            path: "a.rs",
+            occurrences: vec![occ(0, "r c p 1 a/f().", false)],
+        }];
+        let stats = apply(&mut index, &docs);
+        assert_eq!((stats.uncovered_files, stats.uncovered_calls), (0, 0));
     }
 
     #[test]

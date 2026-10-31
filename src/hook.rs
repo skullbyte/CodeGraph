@@ -116,7 +116,9 @@ fn reads_source_in(tool: &Map<String, Value>, project: &Path) -> bool {
     ["file_path", "path", "pattern"]
         .iter()
         .filter_map(|key| get(key))
-        .any(|target| inside(target) && Lang::from_path(target).is_some())
+        .any(|target| {
+            inside(target) && Lang::from_path(target).is_some_and(|lang| lang != Lang::Markdown)
+        })
 }
 
 /// Where the per-agent counters live: a private directory (mode 0700) of this user, so nobody

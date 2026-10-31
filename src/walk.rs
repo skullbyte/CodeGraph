@@ -70,7 +70,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_only_wanted_sources() {
+    fn lists_only_wanted_sources_and_markdown_docs() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         for f in [
@@ -89,7 +89,7 @@ mod tests {
         fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
         assert_eq!(
             list_files(root).unwrap(),
-            vec!["src/main.rs", "web/app.tsx"]
+            vec!["src/main.rs", "web/app.tsx", "web/notes.md"]
         );
     }
 }
