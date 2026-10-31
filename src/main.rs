@@ -133,6 +133,11 @@ enum DocsAction {
     },
     /// Validate and store what an agent found in one doc (a JSON file).
     Ingest { file: PathBuf },
+    /// Print the text of a listed doc; for a PDF the text is extracted locally (cheap in tokens).
+    Text {
+        /// Path relative to the project, as `docs pending` shows it.
+        doc: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -493,6 +498,10 @@ fn cmd_docs(root: &Path, action: &DocsAction, json: bool) -> Result<()> {
             } else {
                 print_pending(&pending);
             }
+            Ok(())
+        }
+        DocsAction::Text { doc } => {
+            print!("{}", semantic::doc_text(root, doc)?);
             Ok(())
         }
         DocsAction::Ingest { file } => {

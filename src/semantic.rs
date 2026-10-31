@@ -7,8 +7,11 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::index;
@@ -22,6 +25,10 @@ pub const INLINE_MAX_LINES: usize = 1500;
 pub const CHUNK_LINES: usize = 6000;
 /// Docs bigger than this are never offered (same cap as the markdown scan).
 pub const MAX_DOC_BYTES: u64 = 1 << 20;
+/// PDFs are bigger by nature; their extracted text is cut to `MAX_DOC_BYTES`.
+pub const MAX_PDF_BYTES: u64 = 20 << 20;
+const PDF_TIMEOUT: Duration = Duration::from_secs(10);
+const PDF_STACK_BYTES: usize = 64 << 20;
 pub const MAX_INGEST_BYTES: usize = 1 << 20;
 pub const MAX_CONCEPTS: usize = 200;
 pub const MAX_LINKS: usize = 500;
@@ -137,7 +144,7 @@ pub fn pending(root: &Path, store: &Store, max_lines: Option<usize>) -> Result<P
             continue;
         }
         let path = root.join(&rel);
-        if fs::metadata(&path).map_or(true, |m| m.len() > MAX_DOC_BYTES) {
+        if fs::metadata(&path).map_or(true, |m| m.len() > size_cap(&rel)) {
             continue;
         }
         let Ok(bytes) = fs::read(&path) else { continue };
@@ -145,8 +152,8 @@ pub fn pending(root: &Path, store: &Store, max_lines: Option<usize>) -> Result<P
         if store.files.get(&rel).is_some_and(|e| e.hash == full) {
             continue;
         }
-        let lines = if rel.to_lowercase().ends_with(".pdf") {
-            0
+        let lines = if is_pdf(&rel) {
+            pdf_text(&path).map_or(0, |t| count_lines(t.as_bytes()))
         } else {
             count_lines(&bytes)
         };
@@ -289,21 +296,91 @@ fn line_ok(line: u32, lines: usize) -> bool {
 
 /// For a doc that `docs pending` could offer: all doc paths, its full hash and its line count.
 fn current_doc(root: &Path, rel: &str) -> Result<(Vec<String>, String, usize)> {
-    let docs = walk::list_docs(root)?;
-    if is_sensitive(rel) || !docs.iter().any(|d| d == rel) {
-        bail!("{rel} is not a document of this project");
-    }
+    let docs = list_checked(root, rel)?;
     let path = root.join(rel);
-    if fs::metadata(&path)?.len() > MAX_DOC_BYTES {
-        bail!("{rel} is over {MAX_DOC_BYTES} bytes");
+    if fs::metadata(&path)?.len() > size_cap(rel) {
+        bail!("{rel} is over {} bytes", size_cap(rel));
     }
     let bytes = fs::read(&path).with_context(|| format!("reading {rel}"))?;
-    let lines = if rel.to_lowercase().ends_with(".pdf") {
-        usize::MAX
+    let lines = if is_pdf(rel) {
+        let text = pdf_text(&path).with_context(|| format!("{rel} has no extractable text"))?;
+        count_lines(text.as_bytes())
     } else {
         count_lines(&bytes)
     };
     Ok((docs, blake3::hash(&bytes).to_hex().to_string(), lines))
+}
+
+pub fn is_pdf(rel: &str) -> bool {
+    rel.to_lowercase().ends_with(".pdf")
+}
+
+fn size_cap(rel: &str) -> u64 {
+    if is_pdf(rel) {
+        MAX_PDF_BYTES
+    } else {
+        MAX_DOC_BYTES
+    }
+}
+
+/// Text of a PDF, read locally (far fewer Claude tokens than page images). A damaged PDF is an
+/// error, never a panic; extraction runs on a big-stack thread and gives up after `PDF_TIMEOUT`;
+/// the text is cut to `MAX_DOC_BYTES`. Known limit: a decompression bomb can still use memory
+/// before the timeout (no memory cap without a separate process).
+pub fn pdf_text(path: &Path) -> Result<String> {
+    if fs::metadata(path)?.len() > MAX_PDF_BYTES {
+        bail!("{} is over {MAX_PDF_BYTES} bytes", path.display());
+    }
+    let (tx, rx) = mpsc::channel();
+    let target = path.to_path_buf();
+    thread::Builder::new()
+        .stack_size(PDF_STACK_BYTES)
+        .spawn(move || {
+            let extracted = std::panic::catch_unwind(|| pdf_extract::extract_text(&target));
+            let _ = tx.send(match extracted {
+                Ok(Ok(text)) => Ok(text),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(_) => Err("could not be parsed".to_string()),
+            });
+        })
+        .context("starting the PDF reader")?;
+    let outcome = rx
+        .recv_timeout(PDF_TIMEOUT)
+        .map_err(|_| anyhow!("{} took over {PDF_TIMEOUT:?}; gave up", path.display()))?;
+    let text = outcome.map_err(|e| anyhow!("{}: {e}", path.display()))?;
+    Ok(cut_text(text, MAX_DOC_BYTES as usize))
+}
+
+/// Cut to at most `max` bytes, on a character boundary.
+fn cut_text(mut text: String, max: usize) -> String {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
+}
+
+/// The text an agent should read for a listed doc: a PDF's extracted text, other docs as they are.
+pub fn doc_text(root: &Path, rel: &str) -> Result<String> {
+    list_checked(root, rel)?;
+    let path = root.join(rel);
+    if is_pdf(rel) {
+        return pdf_text(&path);
+    }
+    if fs::metadata(&path)?.len() > MAX_DOC_BYTES {
+        bail!("{rel} is over {MAX_DOC_BYTES} bytes");
+    }
+    fs::read_to_string(&path).with_context(|| format!("reading {rel}"))
+}
+
+/// All doc paths, after checking that `rel` is one `docs pending` could offer.
+fn list_checked(root: &Path, rel: &str) -> Result<Vec<String>> {
+    let docs = walk::list_docs(root)?;
+    if is_sensitive(rel) || !docs.iter().any(|d| d == rel) {
+        bail!("{rel} is not a document of this project");
+    }
+    Ok(docs)
 }
 
 /// Without control characters (a newline would fake an extra result line), trimmed, cut to the cap.
@@ -752,5 +829,118 @@ mod tests {
         let store = store_with("docs/a.md", "rate limiting", "explain", "INFERRED");
         let lines = explain_with(&idx, &store, "rate limiting").lines();
         assert_eq!(lines, ["def docs/a.md:3 [concept] rate limiting"]);
+    }
+
+    /// A one-page PDF with the given text lines, offsets computed so the xref table is valid.
+    fn pdf_bytes(lines: &[&str]) -> Vec<u8> {
+        let mut stream = String::from("BT /F1 12 Tf 14 TL 50 700 Td ");
+        for l in lines {
+            stream.push_str(&format!("({l}) Tj T* "));
+        }
+        stream.push_str("ET");
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (n, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend(format!("{} 0 obj\n{o}\nendobj\n", n + 1).bytes());
+        }
+        let xref = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).bytes());
+        for off in offsets {
+            out.extend(format!("{off:010} 00000 n \n").bytes());
+        }
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objs.len() + 1
+            )
+            .bytes(),
+        );
+        out
+    }
+
+    #[test]
+    fn pdf_text_is_read_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.pdf"),
+            pdf_bytes(&["Hello codegraph", "second line"]),
+        )
+        .unwrap();
+        let text = pdf_text(&dir.path().join("a.pdf")).unwrap();
+        assert!(
+            text.contains("Hello codegraph") && text.contains("second line"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_broken_pdf_is_an_error_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("bad.pdf"), b"%PDF-1.4 garbage").unwrap();
+        assert!(pdf_text(&dir.path().join("bad.pdf")).is_err());
+        let p = pending(dir.path(), &Store::default(), None).unwrap();
+        assert_eq!((p.docs.len(), p.docs[0].lines), (1, 0), "listed, no text");
+    }
+
+    #[test]
+    fn pdfs_are_pending_with_real_line_counts_and_ingest_checks_lines() {
+        let dir = project();
+        fs::write(dir.path().join("docs/p.pdf"), pdf_bytes(&["alpha", "beta"])).unwrap();
+        let idx = built(dir.path());
+        let p = pending(dir.path(), &Store::default(), None).unwrap();
+        let pdf = p.docs.iter().find(|d| d.path == "docs/p.pdf").unwrap();
+        assert!(pdf.lines >= 2, "{pdf:?}");
+        let mut store = Store::default();
+        let h = hash_of(dir.path(), "docs/p.pdf");
+        let raw = json(
+            "docs/p.pdf",
+            &h,
+            r#""concepts":[{"name":"alpha","line":1},{"name":"far","line":9999}],"links":[]"#,
+        );
+        let s = ingest(dir.path(), &idx, &mut store, &raw).unwrap();
+        assert_eq!((s.concepts, s.dropped), (1, 1));
+    }
+
+    #[test]
+    fn doc_text_serves_only_listed_docs() {
+        let dir = project();
+        write(dir.path(), "docs/my-secret.md", "x\n");
+        assert_eq!(
+            doc_text(dir.path(), "docs/a.md").unwrap(),
+            "# A\nrate limiting\n"
+        );
+        assert!(doc_text(dir.path(), "src/lib.rs").is_err());
+        assert!(doc_text(dir.path(), "../a.md").is_err());
+        assert!(doc_text(dir.path(), "docs/my-secret.md").is_err());
+    }
+
+    #[test]
+    fn ingest_refuses_a_pdf_without_extractable_text() {
+        let dir = project();
+        fs::write(dir.path().join("docs/bad.pdf"), b"%PDF-1.4 garbage").unwrap();
+        let idx = built(dir.path());
+        let mut store = Store::default();
+        let h = hash_of(dir.path(), "docs/bad.pdf");
+        let raw = json(
+            "docs/bad.pdf",
+            &h,
+            r#""concepts":[{"name":"x","line":1}],"links":[]"#,
+        );
+        assert!(ingest(dir.path(), &idx, &mut store, &raw).is_err());
+    }
+
+    #[test]
+    fn text_is_cut_on_a_character_boundary() {
+        assert_eq!(cut_text("aéb".to_string(), 2), "a");
+        assert_eq!(cut_text("aéb".to_string(), 3), "aé");
+        assert_eq!(cut_text("ab".to_string(), 10), "ab");
     }
 }

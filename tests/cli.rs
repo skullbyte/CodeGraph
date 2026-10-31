@@ -690,3 +690,22 @@ fn docs_ingest_refuses_a_symlinked_doc() {
     let out = run(dir.path(), &["docs", "ingest", sub.to_str().unwrap()]);
     assert!(!out.status.success(), "a symlink must not be ingested");
 }
+
+#[test]
+fn docs_text_prints_listed_docs_only() {
+    let dir = project();
+    fs::write(dir.path().join("README.md"), "# Title\nbody\n").unwrap();
+    let ok = run(dir.path(), &["docs", "text", "README.md"]);
+    assert_eq!(stdout(&ok), "# Title\nbody\n");
+    let no = run(dir.path(), &["docs", "text", "src/lib.rs"]);
+    assert!(!no.status.success());
+}
+
+#[test]
+fn docs_text_on_a_damaged_pdf_fails_fast() {
+    let dir = project();
+    fs::write(dir.path().join("bad.pdf"), b"%PDF-1.4 garbage").unwrap();
+    let out = run(dir.path(), &["docs", "text", "bad.pdf"]);
+    assert!(!out.status.success());
+    assert!(stdout(&run(dir.path(), &["docs", "pending"])).contains("bad.pdf  0 lines"));
+}
