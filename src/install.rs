@@ -16,11 +16,20 @@ use crate::index;
 
 const SKILL: &str = include_str!("skill.md");
 const SKILL_MARKER: &str = "<!-- codegraph-managed";
-const HOOK_COMMANDS: [&str; 2] = ["codegraph hook search", "codegraph hook read"];
+/// Skip quietly when the binary is missing (fresh clone, CI); `exit 0` before the call keeps the
+/// hook's own exit code (2 = block) intact, unlike `&& ... || true`.
+const HOOK_COMMANDS: [&str; 2] = [
+    "command -v codegraph >/dev/null 2>&1 || exit 0; codegraph hook search",
+    "command -v codegraph >/dev/null 2>&1 || exit 0; codegraph hook read",
+];
+/// What older installs wrote: still recognised as ours, so a reinstall upgrades them.
+const LEGACY_HOOK_COMMANDS: [&str; 2] = ["codegraph hook search", "codegraph hook read"];
 /// The line `~/.claude/bin/codemap.sh` used to run at session start; `codegraph index` replaces it.
 const OLD_SESSION_START: &str =
     "\"$HOME\"/.claude/bin/codemap.sh \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1";
-const NEW_SESSION_START: &str = "codegraph index \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1";
+const NEW_SESSION_START: &str = "command -v codegraph >/dev/null 2>&1 || exit 0; codegraph index \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1";
+/// The unguarded form an earlier install wrote.
+const LEGACY_SESSION_START: &str = "codegraph index \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1";
 
 fn our_hooks() -> Vec<Value> {
     let entry = |matcher: &str, command: &str| {
@@ -42,7 +51,7 @@ fn our_server() -> Value {
 fn is_our_command(hook: &Value) -> bool {
     hook.get("command")
         .and_then(Value::as_str)
-        .is_some_and(|c| HOOK_COMMANDS.contains(&c))
+        .is_some_and(|c| HOOK_COMMANDS.contains(&c) || LEGACY_HOOK_COMMANDS.contains(&c))
 }
 
 /// Take our hooks out of every group; a group left empty goes too, a group with other hooks stays.
@@ -95,13 +104,25 @@ pub fn add_to_settings(mut settings: Value) -> Result<Value> {
     strip_our_hooks(pre);
     pre.extend(our_hooks());
     if let Some(groups) = hooks.get_mut("SessionStart").and_then(Value::as_array_mut) {
-        for hook in groups
+        let mut commands = groups
             .iter_mut()
             .filter_map(|g| g.get_mut("hooks").and_then(Value::as_array_mut))
             .flatten()
+            .collect::<Vec<_>>();
+        let command = |h: &Value| h.get("command").and_then(Value::as_str).map(str::to_owned);
+        // Already installed: leave every other line alone (e.g. a hand-kept codemap.sh).
+        if !commands
+            .iter()
+            .any(|h| command(h).as_deref() == Some(NEW_SESSION_START))
         {
-            if hook.get("command").and_then(Value::as_str) == Some(OLD_SESSION_START) {
-                hook["command"] = json!(NEW_SESSION_START);
+            for hook in commands.iter_mut() {
+                let c = command(hook);
+                if c.as_deref() == Some(OLD_SESSION_START)
+                    || c.as_deref() == Some(LEGACY_SESSION_START)
+                {
+                    hook["command"] = json!(NEW_SESSION_START);
+                    break; // one index line is enough; the rest are the user's
+                }
             }
         }
     }
@@ -314,8 +335,13 @@ mod tests {
         assert_eq!(pre.len(), 3, "the user's own hook stays, ours are added");
         assert_eq!(pre[0]["hooks"][0]["command"], "my-linter");
         assert_eq!(pre[1]["matcher"], "Bash|Grep");
-        assert_eq!(pre[1]["hooks"][0]["command"], "codegraph hook search");
-        assert_eq!(pre[2]["hooks"][0]["command"], "codegraph hook read");
+        assert_eq!(pre[1]["hooks"][0]["command"], HOOK_COMMANDS[0]);
+        assert_eq!(pre[2]["hooks"][0]["command"], HOOK_COMMANDS[1]);
+        assert!(
+            HOOK_COMMANDS[0].starts_with("command -v codegraph"),
+            "a missing binary must not fail every tool call"
+        );
+        assert!(HOOK_COMMANDS[0].ends_with("; codegraph hook search"));
         assert_eq!(add_to_settings(once.clone()).unwrap(), once);
     }
 
@@ -384,6 +410,53 @@ mod tests {
         assert!(add_to_settings(json!({ "hooks": 3 })).is_err());
         assert!(add_to_settings(json!({ "hooks": { "PreToolUse": {} } })).is_err());
         assert!(add_to_mcp(json!({ "mcpServers": [] })).is_err());
+    }
+
+    #[test]
+    fn old_plain_hooks_are_upgraded_not_duplicated_and_still_removed() {
+        for (i, legacy) in LEGACY_HOOK_COMMANDS.iter().enumerate() {
+            let old = json!({ "hooks": { "PreToolUse": [
+                { "matcher": "Bash", "hooks": [{ "type": "command", "command": legacy, "timeout": 5 }] },
+            ] } });
+            let upgraded = add_to_settings(old.clone()).unwrap();
+            let text = upgraded.to_string();
+            assert!(
+                !text.contains(&format!("\"{legacy}\"")),
+                "old command is gone"
+            );
+            assert_eq!(text.matches(&format!("; {legacy}")).count(), 1, "hook {i}");
+            let cleaned = remove_from_settings(old).unwrap();
+            assert!(!cleaned.to_string().contains(legacy));
+        }
+    }
+
+    #[test]
+    fn session_start_is_guarded_and_a_second_line_is_left_alone() {
+        assert!(NEW_SESSION_START.starts_with("command -v codegraph"));
+        let group = |cmds: &[&str]| {
+            let hooks: Vec<Value> = cmds
+                .iter()
+                .map(|c| json!({ "type": "command", "command": c }))
+                .collect();
+            json!({ "hooks": { "SessionStart": [{ "hooks": hooks }] } })
+        };
+        let first = add_to_settings(group(&[OLD_SESSION_START])).unwrap();
+        assert_eq!(
+            first["hooks"]["SessionStart"],
+            group(&[NEW_SESSION_START])["hooks"]["SessionStart"]
+        );
+        let legacy = group(&[LEGACY_SESSION_START, OLD_SESSION_START]);
+        assert_eq!(
+            add_to_settings(legacy).unwrap()["hooks"]["SessionStart"],
+            group(&[NEW_SESSION_START, OLD_SESSION_START])["hooks"]["SessionStart"],
+            "only the first match is upgraded; the codemap line stays"
+        );
+        let both = group(&[NEW_SESSION_START, OLD_SESSION_START]);
+        assert_eq!(
+            add_to_settings(both.clone()).unwrap()["hooks"]["SessionStart"],
+            both["hooks"]["SessionStart"],
+            "kept codemap line survives"
+        );
     }
 
     #[test]
