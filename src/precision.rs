@@ -1,0 +1,384 @@
+//! How exact are our call links? Measured against SCIP, the compiler's own answer: for calls to a
+//! name with several project definitions, which definition does each strategy pick, and does it
+//! match SCIP? Needs `codegraph scip` data (Rust, TypeScript); the table of how many call sites
+//! point at one, several or no project definition works for every language. Ours, not in Graphify.
+
+use std::collections::HashMap;
+
+use serde::Serialize;
+
+use crate::model::{FileEntry, Index, Resolution};
+
+/// One way of choosing among the definitions of a name, scored against SCIP.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct Score {
+    pub name: &'static str,
+    /// Exactly one candidate left, and it is SCIP's.
+    pub unique_right: usize,
+    /// Exactly one candidate left, and SCIP says another.
+    pub unique_wrong: usize,
+    /// Several candidates left, SCIP's among them, fewer than all definitions.
+    pub narrowed: usize,
+    /// All definitions still candidates.
+    pub ambiguous: usize,
+    /// The strategy dropped SCIP's definition, or returned nothing.
+    pub lost: usize,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct Report {
+    /// Call sites in code files.
+    pub calls: usize,
+    /// ... whose callee has exactly one, several, or no project definition.
+    pub one: usize,
+    pub several: usize,
+    pub none: usize,
+    /// Calls to a several-definition name that SCIP resolved to one of our extracted definitions:
+    /// the calls the strategies are scored on.
+    pub truth: usize,
+    /// SCIP resolved these to something we do not extract as a symbol (macro-generated code, a
+    /// field, a declaration): no strategy could find it, so they are left out of the scores.
+    pub unscored: usize,
+    pub scores: Vec<Score>,
+}
+
+/// A project definition: file and 1-based line, as SCIP names it.
+type Def = (String, u32);
+
+/// Picks candidate definitions (indexes into the name's definition list) for call number `call`
+/// of `file`. More strategies are added next to `name_only` as resolution gets smarter.
+type Strategy = fn(&Index, &FileEntry, usize, &[Def]) -> Vec<usize>;
+
+const STRATEGIES: [(&str, Strategy); 1] = [("name", name_only)];
+
+/// Today's rule: every definition of the name is a candidate.
+fn name_only(_: &Index, _: &FileEntry, _: usize, defs: &[Def]) -> Vec<usize> {
+    (0..defs.len()).collect()
+}
+
+/// Project definitions by name (`impl` blocks and doc headings do not count).
+fn definitions(index: &Index) -> HashMap<&str, Vec<Def>> {
+    let mut map: HashMap<&str, Vec<Def>> = HashMap::new();
+    for file in index.files.values() {
+        for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
+            map.entry(s.name.as_str())
+                .or_default()
+                .push((file.path.clone(), s.line));
+        }
+    }
+    for list in map.values_mut() {
+        list.sort();
+        list.dedup(); // two symbols on one line (generated code) are one definition
+    }
+    map
+}
+
+pub fn measure(index: &Index) -> Report {
+    let defs = definitions(index);
+    let mut report = Report {
+        scores: STRATEGIES
+            .iter()
+            .map(|(name, _)| Score {
+                name,
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    for file in index.files.values().filter(|f| !f.is_doc()) {
+        for (i, call) in file.calls.iter().enumerate() {
+            let candidates = defs
+                .get(call.callee.as_str())
+                .map_or(&[][..], Vec::as_slice);
+            report.calls += 1;
+            match candidates.len() {
+                0 => report.none += 1,
+                1 => report.one += 1,
+                _ => report.several += 1,
+            }
+            let Some(Resolution::Def { path, line }) = file.resolution(i) else {
+                continue;
+            };
+            if candidates.len() < 2 {
+                continue;
+            }
+            let Some(truth) = candidates.iter().position(|(p, l)| p == path && l == line) else {
+                report.unscored += 1;
+                continue;
+            };
+            report.truth += 1;
+            for ((_, pick), score) in STRATEGIES.iter().zip(&mut report.scores) {
+                score.add(&pick(index, file, i, candidates), truth, candidates.len());
+            }
+        }
+    }
+    report
+}
+
+impl Score {
+    fn add(&mut self, picked: &[usize], truth: usize, all: usize) {
+        let hit = picked.contains(&truth);
+        match (hit, picked.len()) {
+            (false, 1) => self.unique_wrong += 1,
+            (false, _) => self.lost += 1,
+            (true, 1) => self.unique_right += 1,
+            (true, n) if n < all => self.narrowed += 1,
+            (true, _) => self.ambiguous += 1,
+        }
+    }
+}
+
+fn percent(part: usize, whole: usize) -> usize {
+    // Rounded to the nearest percent (a row of outcomes can add up to 99 or 101).
+    (part * 200 + whole).checked_div(whole * 2).unwrap_or(0)
+}
+
+impl Report {
+    pub fn lines(&self) -> Vec<String> {
+        let share = |n| format!("{n} ({}%)", percent(n, self.calls));
+        let mut out = vec![
+            format!(
+                "{} call sites in code files, by project definitions of the callee:",
+                self.calls
+            ),
+            format!("  one (exact by name): {}", share(self.one)),
+            format!(
+                "  several (name alone can be wrong): {}",
+                share(self.several)
+            ),
+            format!("  none (library or dynamic): {}", share(self.none)),
+        ];
+        let unscored = format!(
+            "  {} more SCIP answers point at code we do not extract (macros, fields): not scored",
+            self.unscored
+        );
+        if self.truth == 0 {
+            out.push(if self.unscored == 0 {
+                "no SCIP answers for calls to multi-definition names: run `just scip` (Rust, TypeScript)".into()
+            } else {
+                format!("nothing to score: {}", unscored.trim_start_matches(' '))
+            });
+            return out;
+        }
+        out.push(format!(
+            "{} calls to several-definition names have a SCIP answer we can score; what each strategy picks:",
+            self.truth
+        ));
+        for s in &self.scores {
+            let of = |n| format!("{}%", percent(n, self.truth));
+            out.push(format!(
+                "  {}: right {}, wrong {}, narrowed {}, still all {}, lost the right one {}",
+                s.name,
+                of(s.unique_right),
+                of(s.unique_wrong),
+                of(s.narrowed),
+                of(s.ambiguous),
+                of(s.lost)
+            ));
+        }
+        if self.unscored > 0 {
+            out.push(unscored);
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Call, FileEntry, Kind, Resolution, ResolvedCall, Symbol};
+
+    fn symbol(name: &str, line: u32) -> Symbol {
+        Symbol {
+            name: name.into(),
+            kind: Kind::Fn,
+            line,
+            signature: format!("fn {name}()"),
+        }
+    }
+
+    fn call(callee: &str, line: u32) -> Call {
+        Call {
+            callee: callee.into(),
+            line,
+            caller: Some("main".into()),
+        }
+    }
+
+    fn file(path: &str, symbols: Vec<Symbol>, calls: Vec<Call>) -> FileEntry {
+        FileEntry {
+            path: path.into(),
+            symbols,
+            calls,
+            ..Default::default()
+        }
+    }
+
+    /// `new` is defined in a.rs:1 and b.rs:1; `once` only in a.rs; main.rs calls all three plus `ext`.
+    fn sample() -> Index {
+        let mut main = file(
+            "main.rs",
+            vec![symbol("main", 1)],
+            vec![
+                call("new", 2),
+                call("new", 3),
+                call("once", 4),
+                call("ext", 5),
+            ],
+        );
+        // SCIP: the first `new` goes to b.rs:1, the second to a.rs:1 (dropped by no strategy).
+        main.resolved = vec![
+            ResolvedCall {
+                call: 0,
+                target: Resolution::Def {
+                    path: "b.rs".into(),
+                    line: 1,
+                },
+            },
+            ResolvedCall {
+                call: 1,
+                target: Resolution::Def {
+                    path: "a.rs".into(),
+                    line: 1,
+                },
+            },
+        ];
+        let files = [
+            file("a.rs", vec![symbol("new", 1), symbol("once", 2)], vec![]),
+            file("b.rs", vec![symbol("new", 1)], vec![]),
+            main,
+        ];
+        Index {
+            files: files.into_iter().map(|f| (f.path.clone(), f)).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn counts_call_sites_by_how_many_definitions_the_callee_has() {
+        let r = measure(&sample());
+        assert_eq!((r.calls, r.one, r.several, r.none), (4, 1, 2, 1));
+    }
+
+    #[test]
+    fn name_only_leaves_every_scip_resolved_call_ambiguous() {
+        let r = measure(&sample());
+        assert_eq!(r.truth, 2);
+        let name = &r.scores[0];
+        assert_eq!(name.name, "name");
+        assert_eq!(
+            (
+                name.unique_right,
+                name.unique_wrong,
+                name.narrowed,
+                name.ambiguous,
+                name.lost
+            ),
+            (0, 0, 0, 2, 0)
+        );
+    }
+
+    #[test]
+    fn a_pick_is_filed_under_exactly_one_outcome() {
+        let mut s = Score::default();
+        s.add(&[1], 1, 3); // one left, SCIP's
+        s.add(&[0], 1, 3); // one left, another
+        s.add(&[0, 1], 1, 3); // narrowed
+        s.add(&[0, 1, 2], 1, 3); // nothing excluded
+        s.add(&[0, 2], 1, 3); // several left, SCIP's dropped
+        s.add(&[], 1, 3); // nothing left
+        assert_eq!(
+            (
+                s.unique_right,
+                s.unique_wrong,
+                s.narrowed,
+                s.ambiguous,
+                s.lost
+            ),
+            (1, 1, 1, 1, 2)
+        );
+    }
+
+    #[test]
+    fn docs_impl_blocks_and_headings_are_not_definitions_or_calls() {
+        let mut index = sample();
+        let mut doc = file("NOTES.md", vec![symbol("new", 1)], vec![call("new", 2)]);
+        doc.symbols[0].kind = Kind::Heading;
+        let mut imp = file("c.rs", vec![symbol("new", 1)], vec![]);
+        imp.symbols[0].kind = Kind::Impl;
+        index.files.insert(doc.path.clone(), doc);
+        index.files.insert(imp.path.clone(), imp);
+        let r = measure(&index);
+        assert_eq!((r.calls, r.one, r.several, r.none), (4, 1, 2, 1));
+        assert_eq!(r.truth, 2, "still two definitions of `new`");
+    }
+
+    #[test]
+    fn a_scip_answer_we_do_not_extract_is_unscored_not_lost() {
+        let mut index = sample();
+        let main = index.files.get_mut("main.rs").unwrap();
+        main.resolved[0].target = Resolution::Def {
+            path: "gen.rs".into(),
+            line: 9,
+        };
+        let r = measure(&index);
+        assert_eq!((r.truth, r.unscored), (1, 1));
+        assert_eq!(r.scores[0].lost, 0);
+        assert!(r.lines().join("\n").contains("1 more SCIP answers"));
+    }
+
+    #[test]
+    fn when_every_scip_answer_is_unscored_the_report_does_not_ask_for_scip_data() {
+        let mut index = sample();
+        let main = index.files.get_mut("main.rs").unwrap();
+        for r in &mut main.resolved {
+            r.target = Resolution::Def {
+                path: "gen.rs".into(),
+                line: 9,
+            };
+        }
+        let text = measure(&index).lines().join("\n");
+        assert!(
+            text.contains("nothing to score: 2 more SCIP answers"),
+            "{text}"
+        );
+        assert!(!text.contains("just scip"), "{text}");
+    }
+
+    #[test]
+    fn two_symbols_on_one_line_are_one_definition() {
+        let mut index = sample();
+        let b = index.files.get_mut("b.rs").unwrap();
+        b.symbols.push(symbol("new", 1)); // e.g. generated twice on the same line
+        assert_eq!(measure(&index).several, 2, "b.rs:1 is still one definition");
+        let a = index.files.get_mut("a.rs").unwrap();
+        a.symbols.retain(|s| s.name != "new");
+        assert_eq!(measure(&index).several, 0, "one definition left is exact");
+    }
+
+    #[test]
+    fn an_index_without_calls_or_scip_data_reports_zeros_and_says_how_to_get_data() {
+        let empty = measure(&Index::default());
+        assert_eq!((empty.calls, empty.truth), (0, 0));
+        let text = empty.lines().join("\n");
+        assert!(text.contains("0 call sites"), "{text}");
+        assert!(text.contains("just scip"), "{text}");
+    }
+
+    #[test]
+    fn the_text_report_and_json_name_every_number() {
+        let r = measure(&sample());
+        let lines = r.lines();
+        assert_eq!(
+            lines[0],
+            "4 call sites in code files, by project definitions of the callee:"
+        );
+        assert_eq!(lines[1], "  one (exact by name): 1 (25%)");
+        assert_eq!(lines[2], "  several (name alone can be wrong): 2 (50%)");
+        assert_eq!(lines[3], "  none (library or dynamic): 1 (25%)");
+        assert!(lines[5].starts_with("  name: right 0%, wrong 0%, narrowed 0%, still all 100%"));
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["scores"][0]["name"], "name");
+        assert_eq!(json["truth"], 2);
+    }
+}

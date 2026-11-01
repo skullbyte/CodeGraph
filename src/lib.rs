@@ -13,6 +13,7 @@ pub mod lang;
 pub mod mermaid;
 pub mod model;
 pub mod obsidian;
+pub mod precision;
 pub mod query;
 pub mod report;
 pub mod scip;

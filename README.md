@@ -21,6 +21,7 @@ codegraph html               # writes .claude/graph.html: offline interactive ma
 codegraph mermaid <name>     # Mermaid flowchart of what <name> calls (--depth N, default 2)
 codegraph obsidian           # writes an Obsidian vault to .claude/obsidian (--out DIR); notes of deleted files are not removed
 codegraph scip [index.scip]  # makes callers/hubs/communities exact from a SCIP index (see below)
+codegraph precision          # how exact are call links? scored against SCIP (run `just scip` first)
 codegraph benchmark          # vs Graphify (if installed): index time + explain answers (--name X, repeatable)
 codegraph docs pending       # docs Claude has not read yet (new or changed), with the plan (--max-lines N)
 codegraph docs ingest <json> # validate and store what an agent found in one doc

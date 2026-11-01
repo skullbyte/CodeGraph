@@ -135,6 +135,8 @@ enum Command {
     },
     /// Serve the queries to Claude Code as MCP tools over stdin/stdout.
     Serve,
+    /// How exact are the call links? Scores each strategy against SCIP (run `just scip` first).
+    Precision,
     /// Compare codegraph with Graphify (if installed): index time and `explain` answers.
     Benchmark {
         /// Symbol to compare on (repeatable); defaults to the 5 top hubs.
@@ -218,6 +220,17 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string(&answer)?);
             } else {
                 answer.lines().iter().for_each(|line| println!("{line}"));
+            }
+            Ok(())
+        }
+        Command::Precision => {
+            let report = codegraph::precision::measure(&load(&cli.dir)?);
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                for line in report.lines() {
+                    println!("{line}");
+                }
             }
             Ok(())
         }
