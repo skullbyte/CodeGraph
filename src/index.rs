@@ -22,6 +22,8 @@ pub struct Stats {
     pub reused: usize,
     /// Files that could not be read (e.g. not UTF-8) or parsed; left out of the index.
     pub skipped: usize,
+    /// Saved SCIP files applied again after this run parsed something.
+    pub scip_files: usize,
 }
 
 /// The readable graph, rewritten on every index/update.
@@ -342,7 +344,8 @@ mod tests {
             Stats {
                 parsed: 2,
                 reused: 0,
-                skipped: 0
+                skipped: 0,
+                scip_files: 0
             }
         );
 
@@ -352,7 +355,8 @@ mod tests {
             Stats {
                 parsed: 0,
                 reused: 2,
-                skipped: 0
+                skipped: 0,
+                scip_files: 0
             }
         );
         assert_eq!(first, second);
@@ -364,7 +368,8 @@ mod tests {
             Stats {
                 parsed: 1,
                 reused: 1,
-                skipped: 0
+                skipped: 0,
+                scip_files: 0
             }
         );
         assert_eq!(third.files["b.rs"].calls[0].callee, "c");

@@ -19,6 +19,6 @@ This project is indexed. The `codegraph` MCP tools (or the same commands on the 
 
 Notes:
 - When a name has several definitions, each hit ends with `-> path:line`; use that to tell them apart.
-- Calls are matched by name until `codegraph scip` has imported a compiler index (`rust-analyzer scip .`, `scip-typescript index`); generic names such as `new` are noisy before that.
+- Calls are matched by name until `codegraph scip` has imported a compiler index (`codegraph scip --run` starts the installed indexer); generic names such as `new` are noisy before that.
 - Grep is still the right tool for text in strings, comments and config files.
 - Out of date after edits? `codegraph update <file>` or `codegraph index`.

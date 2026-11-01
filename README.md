@@ -63,9 +63,14 @@ By default `callers` matches calls by name. A SCIP index, written by the languag
 tooling, says which function each call really goes to, so calls into the standard library
 (`new`, `clone`, ...) stop showing up as project edges:
 
-    rust-analyzer scip .             # Rust: writes index.scip
-    scip-typescript index            # TypeScript/JavaScript: writes index.scip
-    codegraph index && codegraph scip
+    codegraph scip --run             # starts the installed indexer for this project, applies it
+
+`--run` picks `rust-analyzer` (Cargo.toml), `scip-typescript` (tsconfig.json) and `scip-python`
+(pyproject.toml, setup.py or setup.cfg) when they are on PATH, keeps their output in
+`.claude/scip/` and applies it. Indexers run the project's own build (build scripts, plugins), so
+codegraph never starts one by itself. Later `codegraph index` runs bring the answers back by
+themselves for every file that was re-parsed and not edited since the indexer ran. Add `.claude/scip/` to your .gitignore (the files are big). There is no time limit: interrupt a stuck indexer with Ctrl-C. By hand:
+`rust-analyzer scip . && codegraph scip` (reads `index.scip`).
 
 When one name has several project definitions, `callers` adds `-> path:line` to say which one,
 and `hubs` lists each definition on its own. `codegraph scip` also says how many files the index

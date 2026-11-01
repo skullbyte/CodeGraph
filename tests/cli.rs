@@ -79,6 +79,137 @@ fn def_flag_picks_one_definition_or_fails_with_the_choices() {
 }
 
 #[test]
+fn index_applies_saved_scip_data_again_after_it_parses() {
+    let dir = project();
+    let sym = "rust-analyzer cargo p 1 m/alpha().";
+    fs::write(
+        dir.path().join("index.scip"),
+        scip_bytes("src/lib.rs", &[(0, sym, true), (2, sym, false)]),
+    )
+    .unwrap();
+    let first = stdout(&run(dir.path(), &["index"]));
+    assert!(
+        first.contains("scip: re-applied 1 saved file(s)"),
+        "{first}"
+    );
+    // Nothing was parsed this time, so there is nothing to bring back.
+    let again = stdout(&run(dir.path(), &["index"]));
+    assert!(!again.contains("scip:"), "{again}");
+    let graph = fs::read_to_string(dir.path().join(".claude/graph.json")).unwrap();
+    assert!(
+        graph.contains("\"resolved\""),
+        "the answer survives in the saved graph"
+    );
+}
+
+/// `codegraph scip --run` with `path` as the only directory on PATH besides the system ones.
+fn run_scip_with_path(dir: &Path, path: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_codegraph"))
+        .args(["scip", "--run", "--dir"])
+        .arg(dir)
+        .env("PATH", format!("{}:/usr/bin:/bin", path.display()))
+        .output()
+        .expect("binary runs")
+}
+
+#[test]
+fn scip_run_starts_the_indexer_for_the_project_and_applies_its_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = project();
+    fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    run(dir.path(), &["index"]);
+    let sym = "rust-analyzer cargo p 1 m/alpha().";
+    let fake = tempfile::tempdir().unwrap();
+    let canned = fake.path().join("canned.scip");
+    fs::write(
+        &canned,
+        scip_bytes("src/lib.rs", &[(0, sym, true), (2, sym, false)]),
+    )
+    .unwrap();
+    // A stand-in for `rust-analyzer scip . --output FILE`: copies the canned index to FILE.
+    let script = fake.path().join("rust-analyzer");
+    fs::write(
+        &script,
+        format!("#!/bin/sh\ncp '{}' \"$4\"\n", canned.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = run_scip_with_path(dir.path(), fake.path());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join(".claude/scip/rust.scip").is_file());
+    assert!(
+        stdout(&out).starts_with("resolved 1 of 1 calls"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("rust: indexed with rust-analyzer"));
+}
+
+#[test]
+fn scip_run_says_what_it_needs_when_nothing_applies() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let empty = tempfile::tempdir().unwrap();
+    let none = run_scip_with_path(dir.path(), empty.path());
+    assert!(!none.status.success());
+    assert!(String::from_utf8_lossy(&none.stderr).contains("Cargo.toml (rust-analyzer)"));
+    // A marker without its program installed is reported, and nothing is written.
+    fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let missing = run_scip_with_path(dir.path(), empty.path());
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("rust-analyzer is not installed"));
+}
+
+#[test]
+fn scip_run_reports_a_failing_indexer_and_keeps_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = project();
+    fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    run(dir.path(), &["index"]);
+    let fake = tempfile::tempdir().unwrap();
+    let script = fake.path().join("rust-analyzer");
+    fs::write(&script, "#!/bin/sh\necho 'no cargo here' >&2\nexit 3\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = run_scip_with_path(dir.path(), fake.path());
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("rust-analyzer failed") && err.contains("no cargo here"),
+        "{err}"
+    );
+    assert!(!dir.path().join(".claude/scip/rust.scip").exists());
+}
+
+#[test]
+fn scip_run_works_with_a_relative_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempfile::tempdir().unwrap();
+    let proj = parent.path().join("proj");
+    fs::create_dir_all(proj.join("src")).unwrap();
+    fs::write(proj.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+    fs::write(proj.join("Cargo.toml"), "[package]\n").unwrap();
+    run(&proj, &["index"]);
+    let fake = tempfile::tempdir().unwrap();
+    let script = fake.path().join("rust-analyzer");
+    // Writes to the --output it is given, relative to wherever it runs.
+    fs::write(&script, "#!/bin/sh\nprintf '' > \"$4\"\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_codegraph"))
+        .args(["scip", "--run", "--dir", "proj"])
+        .current_dir(parent.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", fake.path().display()))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("rust: indexed with rust-analyzer"), "{err}");
+    assert!(proj.join(".claude/scip/rust.scip").is_file());
+}
+
+#[test]
 fn json_flag_prints_json() {
     let dir = project();
     run(dir.path(), &["index"]);

@@ -21,5 +21,4 @@ fmt-check-rs:
 
 # Refresh exact call data (SCIP) after code changes; needs rust-analyzer and an installed codegraph
 scip:
-    rust-analyzer scip .
-    codegraph scip
+    codegraph scip --run

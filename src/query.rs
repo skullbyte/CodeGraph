@@ -120,9 +120,10 @@ fn call_sites(index: &Index, name: &str) -> Vec<Site> {
                         .as_ref()
                         .map(|r| r.candidates(&f.path, c, scip, defs))
                         .unwrap_or_default();
-                    let target = match (scip, &reach[..]) {
-                        (Some(Resolution::Def { path, line }), _) => Some(format!("{path}:{line}")),
-                        (_, [one]) => Some(format!("{}:{}", defs[*one].path, defs[*one].line)),
+                    // Only a definition that exists now is shown: an old SCIP run may point at a
+                    // line that has since moved.
+                    let target = match &reach[..] {
+                        [one] => Some(format!("{}:{}", defs[*one].path, defs[*one].line)),
                         _ => None,
                     };
                     let hit = CallerHit {
@@ -1140,6 +1141,15 @@ mod tests {
 
     const TWO_NEWS: &str = "struct A;\nstruct B;\nimpl A { fn new() {} }\nimpl B { fn new() {} }\n\
          fn one() { A::new(); }\nfn two() { B::new(); }\nfn three() { x.new(); }\n";
+
+    #[test]
+    fn a_scip_answer_that_names_no_current_definition_is_not_shown() {
+        let mut index = index_of(&[("a.rs", TWO_NEWS)]);
+        // Call 0 is `A::new()`; SCIP (an old run) says line 99, where nothing is defined now.
+        resolve(&mut index, "a.rs", 0, def_at("a.rs", 99));
+        let got: Vec<_> = callers(&index, "new").iter().map(CallerHit::text).collect();
+        assert_eq!(got[0], "a.rs:5  in fn one  -> a.rs:3", "the form decides");
+    }
 
     #[test]
     fn a_def_selector_names_one_definition_or_lists_the_choices() {

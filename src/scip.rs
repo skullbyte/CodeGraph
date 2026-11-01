@@ -4,8 +4,13 @@
 //! every length is checked against the bytes left, and nothing here panics on garbage.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::SystemTime;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::model::{Index, Resolution, ResolvedCall};
 
@@ -45,6 +50,210 @@ pub struct Stats {
     /// the indexer skipped); their calls keep name matching.
     pub uncovered_files: usize,
     pub uncovered_calls: usize,
+    /// Index documents skipped because their source changed after the index was written.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub stale_documents: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// Where `codegraph scip --run` keeps the SCIP files it makes, relative to the project root.
+pub const SAVED_DIR: &str = ".claude/scip";
+
+/// A SCIP file bigger than this is ignored (the biggest seen is tokio's, 22 MB).
+const MAX_SAVED_BYTES: u64 = 1 << 29;
+
+/// The SCIP files kept for a project: `.claude/scip/*.scip` by name (written by `scip --run`),
+/// else a hand-made `index.scip` at the root. Never both: two runs of one file would mix their
+/// positions. Only regular files count (a symlink in a cloned repo is not followed).
+pub fn saved(root: &Path) -> Vec<PathBuf> {
+    let folder = root.join(SAVED_DIR);
+    let regular = |p: &PathBuf| {
+        fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && m.len() <= MAX_SAVED_BYTES)
+    };
+    let mut kept: Vec<PathBuf> = fs::read_dir(&folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "scip"))
+        .filter(regular)
+        .filter(|_| stays_inside(root, &folder))
+        .collect();
+    kept.sort();
+    if kept.is_empty() {
+        kept.push(root.join("index.scip"));
+        kept.retain(regular);
+    }
+    kept
+}
+
+/// A SCIP indexer we know how to start: the files that show it applies, the program, its arguments.
+struct Indexer {
+    lang: &'static str,
+    markers: &'static [&'static str],
+    program: &'static str,
+    /// Arguments for writing the index to `out`.
+    args: fn(&Path) -> Vec<OsString>,
+}
+
+const INDEXERS: [Indexer; 3] = [
+    Indexer {
+        lang: "rust",
+        markers: &["Cargo.toml"],
+        program: "rust-analyzer",
+        args: |out| vec!["scip".into(), ".".into(), "--output".into(), out.into()],
+    },
+    Indexer {
+        lang: "typescript",
+        markers: &["tsconfig.json"],
+        program: "scip-typescript",
+        args: |out| {
+            vec![
+                "index".into(),
+                "--no-progress-bar".into(),
+                "--output".into(),
+                out.into(),
+            ]
+        },
+    },
+    Indexer {
+        lang: "python",
+        markers: &["pyproject.toml", "setup.py", "setup.cfg"],
+        program: "scip-python",
+        args: |out| vec!["index".into(), ".".into(), "--output".into(), out.into()],
+    },
+];
+
+/// The executable called `program` on PATH, if any (a plain file with an execute bit).
+fn on_path(program: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(program))
+        .find(|p| fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+}
+
+/// Start every indexer whose marker file is in `root` and whose program is on PATH, writing
+/// `.claude/scip/<lang>.scip`. Indexers run the project's own build (build scripts, plugins), so
+/// this is only ever called on an explicit request. Returns one line per language to show.
+pub fn run_indexers(root: &Path) -> Result<Vec<String>> {
+    // The indexer runs inside `root` and gets an output path: both must mean the same place.
+    let root = &fs::canonicalize(root).with_context(|| format!("reading {}", root.display()))?;
+    let dir = root.join(SAVED_DIR);
+    let mut lines = Vec::new();
+    for ix in &INDEXERS {
+        if !ix.markers.iter().any(|m| root.join(m).is_file()) {
+            continue;
+        }
+        let Some(program) = on_path(ix.program) else {
+            lines.push(format!(
+                "{}: {} is not installed, skipped",
+                ix.lang, ix.program
+            ));
+            continue;
+        };
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        // The folder comes with the project: a symlink there would send the output elsewhere.
+        if !fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) || !stays_inside(root, &dir) {
+            bail!(
+                "{} is not a plain folder; remove it and run again",
+                dir.display()
+            );
+        }
+        let tmp = dir.join(format!("{}.scip.tmp", ix.lang));
+        let _ = fs::remove_file(&tmp); // a planted link or an old half-written file
+        let out = Command::new(&program)
+            .args((ix.args)(&tmp))
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("starting {}", program.display()))?;
+        if out.status.success() && tmp.is_file() {
+            fs::rename(&tmp, dir.join(format!("{}.scip", ix.lang)))?;
+            lines.push(format!("{}: indexed with {}", ix.lang, ix.program));
+        } else {
+            let _ = fs::remove_file(&tmp);
+            // The indexers chatter while they work; only a failure is worth their last words.
+            let err = String::from_utf8_lossy(&out.stderr);
+            let tail: Vec<_> = err.lines().rev().take(5).collect();
+            let tail: Vec<_> = tail.into_iter().rev().collect();
+            lines.push(format!(
+                "{}: {} failed ({}): {}",
+                ix.lang,
+                ix.program,
+                out.status,
+                tail.join(" | ")
+            ));
+        }
+    }
+    if lines.is_empty() {
+        let wanted: Vec<_> = INDEXERS
+            .iter()
+            .map(|i| format!("{} ({})", i.markers.join("/"), i.program))
+            .collect();
+        bail!(
+            "no project file found for a known indexer: {}",
+            wanted.join(", ")
+        );
+    }
+    Ok(lines)
+}
+
+/// `dir`, with every link resolved, is still under `root` (a cloned repo can make `.claude` a link).
+fn stays_inside(root: &Path, dir: &Path) -> bool {
+    match (fs::canonicalize(root), fs::canonicalize(dir)) {
+        (Ok(root), Ok(dir)) => dir.starts_with(root),
+        _ => false,
+    }
+}
+
+/// A relative path that stays under the project root.
+fn inside_project(path: &str) -> bool {
+    use std::path::Component;
+    Path::new(path)
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// Apply every saved SCIP file to `index`, skipping the documents of files edited after their
+/// SCIP file was written (their positions may have moved; those calls keep the form resolver).
+/// `None` when nothing is saved. Returns the number of SCIP files read with the stats.
+pub fn reapply(root: &Path, index: &mut Index) -> Result<Option<(usize, Stats)>> {
+    let files = saved(root);
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut loaded: Vec<(Vec<u8>, SystemTime)> = Vec::new();
+    for path in &files {
+        let written = fs::metadata(path)
+            .and_then(|m| m.modified())
+            .with_context(|| format!("reading {}", path.display()))?;
+        let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        loaded.push((data, written));
+    }
+    let mut docs = Vec::new();
+    let mut stale = 0;
+    for (data, written) in &loaded {
+        for mut doc in parse(data)? {
+            if !inside_project(doc.path) {
+                continue; // a hostile or foreign path: never touch the disk for it
+            }
+            let edited = fs::metadata(root.join(doc.path))
+                .and_then(|m| m.modified())
+                .is_ok_and(|m| m > *written);
+            if edited {
+                stale += 1;
+                // Positions may have moved, but other files still call what this one defined.
+                doc.occurrences.retain(|o| o.definition);
+            }
+            docs.push(doc);
+        }
+    }
+    let mut stats = apply(index, &docs);
+    stats.stale_documents = stale;
+    Ok(Some((files.len(), stats)))
 }
 
 /// Attach to every call of `index` what the SCIP `docs` say it refers to. A call is matched to the
@@ -448,6 +657,134 @@ mod tests {
             field_bytes(3, b"ext"),
         ]
         .concat()
+    }
+
+    /// A project with `a.rs` (`new` defined on line 1, called on line 2) and a SCIP file saying so.
+    fn project_with_scip() -> (tempfile::TempDir, Index) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn new() {}\nfn run() { new(); }\n",
+        )
+        .unwrap();
+        let sym = "rust-analyzer cargo p 1 m/new().";
+        let def = occurrence_bytes(field_bytes(1, &packed(&[0, 3, 6])), sym, 1);
+        let call = occurrence_bytes(field_bytes(1, &packed(&[1, 12, 15])), sym, 0);
+        fs::write(
+            dir.path().join("index.scip"),
+            index_of("a.rs", &[def, call]),
+        )
+        .unwrap();
+        let (index, _) = crate::index::build(dir.path(), None).unwrap();
+        (dir, index)
+    }
+
+    fn resolved_calls(index: &Index) -> usize {
+        index.files["a.rs"].resolved.len()
+    }
+
+    #[test]
+    fn saved_files_are_applied_again_to_a_rebuilt_index() {
+        let (dir, mut index) = project_with_scip();
+        let (files, stats) = reapply(dir.path(), &mut index).unwrap().unwrap();
+        assert_eq!((files, stats.resolved, stats.stale_documents), (1, 1, 0));
+        assert_eq!(resolved_calls(&index), 1);
+    }
+
+    #[test]
+    fn a_file_edited_after_its_scip_file_is_left_to_the_resolver() {
+        let (dir, mut index) = project_with_scip();
+        let later = SystemTime::now() + std::time::Duration::from_secs(60);
+        let src = fs::File::options()
+            .write(true)
+            .open(dir.path().join("a.rs"))
+            .unwrap();
+        src.set_modified(later).unwrap();
+        let (_, stats) = reapply(dir.path(), &mut index).unwrap().unwrap();
+        assert_eq!((stats.stale_documents, stats.resolved), (1, 0));
+        assert_eq!(resolved_calls(&index), 0);
+    }
+
+    #[test]
+    fn kept_files_win_over_a_hand_made_root_index() {
+        let (dir, _) = project_with_scip();
+        fs::create_dir_all(dir.path().join(SAVED_DIR)).unwrap();
+        let kept = dir.path().join(SAVED_DIR).join("rust.scip");
+        fs::copy(dir.path().join("index.scip"), &kept).unwrap();
+        assert_eq!(saved(dir.path()), vec![kept]);
+    }
+
+    #[test]
+    fn a_stale_file_still_counts_as_the_definition_other_files_call() {
+        let (dir, _) = project_with_scip();
+        fs::write(dir.path().join("b.rs"), "fn go() { new(); }\n").unwrap();
+        let sym = "rust-analyzer cargo p 1 m/new().";
+        let def = occurrence_bytes(field_bytes(1, &packed(&[0, 3, 6])), sym, 1);
+        let call_a = occurrence_bytes(field_bytes(1, &packed(&[1, 12, 15])), sym, 0);
+        let call_b = occurrence_bytes(field_bytes(1, &packed(&[0, 12, 15])), sym, 0);
+        let mut data = index_of("a.rs", &[def, call_a]);
+        data.extend(index_of("b.rs", &[call_b]));
+        fs::write(dir.path().join("index.scip"), data).unwrap();
+        let (mut index, _) = crate::index::build(dir.path(), None).unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(60);
+        let a = fs::File::options()
+            .write(true)
+            .open(dir.path().join("a.rs"))
+            .unwrap();
+        a.set_modified(later).unwrap();
+        let (_, stats) = reapply(dir.path(), &mut index).unwrap().unwrap();
+        assert_eq!(stats.stale_documents, 1);
+        let target = &index.files["b.rs"].resolved[0].target;
+        assert_eq!(
+            *target,
+            Resolution::Def {
+                path: "a.rs".into(),
+                line: 1
+            },
+            "a.rs is stale, its definition is not"
+        );
+    }
+
+    #[test]
+    fn a_dot_claude_link_to_elsewhere_is_neither_read_nor_written() {
+        let (dir, _) = project_with_scip();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("scip")).unwrap();
+        fs::copy(
+            dir.path().join("index.scip"),
+            outside.path().join("scip/x.scip"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".claude")).unwrap();
+        // Reading falls back to the root index.scip, never the linked folder.
+        assert_eq!(saved(dir.path()), vec![dir.path().join("index.scip")]);
+        // Writing would land outside: `run_indexers` refuses a folder that fails this test.
+        assert!(!stays_inside(dir.path(), &dir.path().join(SAVED_DIR)));
+        assert!(stays_inside(dir.path(), dir.path()));
+    }
+
+    #[test]
+    fn document_paths_that_leave_the_project_are_ignored() {
+        assert!(inside_project("src/a.rs") && inside_project("./a.rs"));
+        assert!(!inside_project("../x.rs") && !inside_project("/etc/passwd"));
+        assert!(!inside_project("a/../../x"));
+    }
+
+    #[test]
+    fn with_nothing_saved_nothing_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = Index::default();
+        assert!(reapply(dir.path(), &mut index).unwrap().is_none());
+        assert!(saved(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_symlinked_scip_file_is_not_followed() {
+        let (dir, _) = project_with_scip();
+        let real = dir.path().join("index.scip");
+        fs::create_dir_all(dir.path().join(SAVED_DIR)).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join(SAVED_DIR).join("x.scip")).unwrap();
+        assert_eq!(saved(dir.path()), vec![real]);
     }
 
     #[test]

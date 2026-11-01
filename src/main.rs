@@ -124,6 +124,10 @@ enum Command {
     Scip {
         /// The index file (defaults to index.scip in the project root).
         file: Option<PathBuf>,
+        /// Start the installed indexer (rust-analyzer, scip-typescript, scip-python) for this
+        /// project, keep its output in .claude/scip/ and apply it. Runs the project's own build.
+        #[arg(long, conflicts_with = "file")]
+        run: bool,
     },
     /// Wire Claude Code to the graph for this project: search/read hooks, the MCP server, a skill.
     Install {
@@ -360,7 +364,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Docs { action } => cmd_docs(&cli.dir, action, cli.json),
         Command::Serve => serve::run(&cli.dir),
-        Command::Scip { file } => cmd_scip(&cli.dir, file.as_deref(), cli.json),
+        Command::Scip { file, run } => cmd_scip(&cli.dir, file.as_deref(), *run, cli.json),
         Command::Obsidian { out } => {
             let out = out
                 .clone()
@@ -387,13 +391,24 @@ fn cmd_index(root: &Path) -> Result<()> {
     if stats.skipped > 0 {
         eprintln!("warning: skipped {} unreadable files", stats.skipped);
     }
+    if stats.scip_files > 0 {
+        println!("scip: re-applied {} saved file(s)", stats.scip_files);
+    }
     Ok(())
 }
 
 /// Full (incremental) index; the caller must hold the lock. Returns the file count and stats.
 fn reindex(root: &Path) -> Result<(usize, index::Stats)> {
     let previous = index::load(root);
-    let (idx, stats) = index::build(root, previous.as_ref())?;
+    let (mut idx, mut stats) = index::build(root, previous.as_ref())?;
+    // Parsing drops a file's compiler answers; saved SCIP files bring back those still valid.
+    if stats.parsed > 0 {
+        match scip::reapply(root, &mut idx) {
+            Ok(Some((files, _))) => stats.scip_files = files,
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: saved SCIP data not applied: {e:#}"),
+        }
+    }
     write_outputs(root, &idx)?;
     Ok((idx.files.len(), stats))
 }
@@ -662,13 +677,25 @@ fn print_pending(p: &semantic::Pending) {
     }
 }
 
-fn cmd_scip(root: &Path, file: Option<&Path>, json: bool) -> Result<()> {
-    let path = file.map_or_else(|| root.join("index.scip"), Path::to_path_buf);
-    let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    let docs = scip::parse(&data).with_context(|| format!("parsing {}", path.display()))?;
+fn cmd_scip(root: &Path, file: Option<&Path>, run: bool, json: bool) -> Result<()> {
     let _lock = index::lock(root)?;
     let mut idx = load(root)?;
-    let stats = scip::apply(&mut idx, &docs);
+    let stats = if run {
+        let lines = scip::run_indexers(root)?;
+        lines.iter().for_each(|line| eprintln!("{line}"));
+        if !lines.iter().any(|l| l.contains(": indexed with ")) {
+            bail!("no indexer produced a SCIP file");
+        }
+        match scip::reapply(root, &mut idx)? {
+            Some((_, stats)) => stats,
+            None => bail!("the indexers wrote no SCIP file"),
+        }
+    } else {
+        let path = file.map_or_else(|| root.join("index.scip"), Path::to_path_buf);
+        let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let docs = scip::parse(&data).with_context(|| format!("parsing {}", path.display()))?;
+        scip::apply(&mut idx, &docs)
+    };
     index::save(root, &idx)?;
     if json {
         println!("{}", serde_json::to_string(&stats)?);
