@@ -81,6 +81,12 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
         "variable_declarator" => own = add_variable(node, src, facts),
         "import_statement" | "export_statement" => add_import(node, src, facts),
         "call_expression" => add_call(node, src, facts, ctx),
+        "new_expression" => {
+            if let Some(class) = node.child_by_field_name("constructor") {
+                add_class_use(node, class, src, facts, ctx);
+            }
+        }
+        "jsx_opening_element" | "jsx_self_closing_element" => add_jsx(node, src, facts, ctx),
         _ => {}
     }
     inner.enclosing = own.as_deref().or(ctx.enclosing);
@@ -318,6 +324,74 @@ fn add_call(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
             form: call_form(f, src, ctx),
             owner: ctx.container.map(String::from),
         });
+    }
+}
+
+/// `new A()`, `new ns.A()`, `<A />`, `<ns.A />`: a call to the class or component `A`.
+fn add_class_use(node: Node, class: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
+    let mut path = Vec::new();
+    segments(class, &mut path);
+    let (Some(&root), Some(&last)) = (path.first(), path.last()) else {
+        return;
+    };
+    let callee = text(last, src);
+    if callee.is_empty() || !matches!(last.kind(), "identifier" | "property_identifier") {
+        return;
+    }
+    let form = if path.len() == 1 {
+        call_form(last, src, ctx)
+    } else {
+        // `ns.A` and `ns.sub.A` are looked up in a module; through a value or `this`, A is only a name.
+        let name = text(root, src);
+        match ctx
+            .modules
+            .get(name)
+            .filter(|_| !ctx.locals.contains_key(name))
+        {
+            Some(stem) if path.len() == 2 => Form::Module(stem.clone()),
+            Some(_) => Form::Module(text(path[path.len() - 2], src).to_string()),
+            None => Form::Bare,
+        }
+    };
+    facts.calls.push(Call {
+        callee: callee.to_string(),
+        line: line_of(node),
+        caller: ctx.enclosing.map(String::from),
+        form,
+        owner: ctx.container.map(String::from),
+    });
+}
+
+/// The names of a dotted path (`a.b.C`, also JSX `<a.b.C>`), root first.
+fn segments<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+    match node.kind() {
+        "member_expression" => {
+            if let Some(object) = node.child_by_field_name("object") {
+                segments(object, out);
+            }
+            out.extend(node.child_by_field_name("property"));
+        }
+        "nested_identifier" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                segments(child, out);
+            }
+        }
+        _ => out.push(node),
+    }
+}
+
+/// `<Button />`: a component is a call to the function or class of that name; a lowercase tag is HTML.
+fn add_jsx(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
+    let Some(tag) = node.child_by_field_name("name") else {
+        return;
+    };
+    let component = match tag.kind() {
+        "identifier" => text(tag, src).starts_with(|c: char| c.is_ascii_uppercase()),
+        _ => matches!(tag.kind(), "member_expression" | "nested_identifier"),
+    };
+    if component {
+        add_class_use(node, tag, src, facts, ctx);
     }
 }
 
@@ -788,7 +862,9 @@ function local() { show(1); }
         assert_eq!(
             got,
             vec![
-                ("make".to_string(), Form::Bare),
+                ("Logger".to_string(), Form::Bare),
+                ("Thing".into(), Form::Bare),
+                ("make".into(), Form::Bare),
                 ("find".into(), t("Repo")),
                 ("log".into(), t("Logger")),
                 ("q".into(), t("Db")),
@@ -999,6 +1075,93 @@ function h() { x.z(); }
                 typed("four", "Eee")
             ]
         );
+    }
+
+    #[test]
+    fn new_expressions_are_calls_to_the_class() {
+        let src = "import * as ns from './ns';\nimport { Mod } from './mod';\nclass A {}\nfunction f() { new A(); new ns.B(1); new Mod(); new Map(); }\n";
+        let got = forms(src);
+        let names: Vec<_> = got.iter().map(|c| (c.0.as_str(), c.1.clone())).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("A", Form::Bare),
+                ("B", Form::Module("ns".into())),
+                ("Mod", Form::Module("mod".into())),
+                ("Map", Form::Bare),
+            ]
+        );
+    }
+
+    #[test]
+    fn jsx_components_are_calls_but_html_tags_are_not() {
+        let src = "import { Button } from './button';
+function App() {
+  return <div><Button label=\"x\" /><Card>hi</Card><Foo.Bar /></div>;
+}
+function Card() { return <p/>; }
+";
+        let facts = extract_file(Lang::Tsx, src).unwrap();
+        let got: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.form.clone(), c.caller.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "Button",
+                    Form::Module("button".into()),
+                    Some("function App")
+                ),
+                ("Card", Form::Bare, Some("function App")),
+                ("Bar", Form::Bare, Some("function App")),
+            ]
+        );
+    }
+
+    #[test]
+    fn new_through_a_value_or_this_is_a_plain_class_name() {
+        let src = "import * as Models from './models';
+class A {
+  m(r: Repo) { new r.Item(); new this.Foo(); new Models.User(); new Models.sub.Deep(); }
+}
+";
+        let got: Vec<_> = forms(src).into_iter().map(|c| (c.0, c.1)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Item".to_string(), Form::Bare),
+                ("Foo".into(), Form::Bare),
+                ("User".into(), Form::Module("models".into())),
+                ("Deep".into(), Form::Module("sub".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn jsx_member_tags_shadowed_tags_and_plain_javascript() {
+        let src = "import * as ui from './ui';
+function A({ Comp }) { return <div><ui.Card /><Comp /><Foo.Bar /></div>; }
+";
+        for lang in [Lang::Tsx, Lang::JavaScript] {
+            let facts = extract_file(lang, src).unwrap();
+            let got: Vec<_> = facts
+                .calls
+                .iter()
+                .map(|c| (c.callee.as_str(), c.form.clone()))
+                .collect();
+            assert_eq!(
+                got,
+                vec![
+                    ("Card", Form::Module("ui".into())),
+                    ("Comp", Form::Bare),
+                    ("Bar", Form::Bare),
+                ],
+                "{lang:?}"
+            );
+        }
     }
 
     #[test]
