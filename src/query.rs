@@ -265,7 +265,7 @@ fn resolve_import<V>(
         Some(Lang::Python) => resolve_python_module(files, from, imp),
         Some(Lang::Java) => resolve_java_class(files, imp),
         Some(Lang::Kotlin) => resolve_kotlin_class(files, imp),
-        Some(Lang::Php) => resolve_php_class(files, imp),
+        Some(Lang::Php) => resolve_php_class(files, aliases, imp),
         Some(Lang::C | Lang::Cpp | Lang::Header | Lang::Markdown) => {
             resolve_include(files, from, imp)
         }
@@ -364,17 +364,40 @@ fn resolve_kotlin_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<Str
     single_suffix_match(files, &[format!("{base}.kt"), format!("{base}.kts")])
 }
 
-/// PHP class `App\Util\Fmt` -> `App/Util/Fmt.php`, or with the leading namespace parts dropped
-/// (PSR-4 maps `App\` to a folder like `src/`), but never below two parts, so `use Foo;` makes no
-/// edge: the longest candidate that matches exactly one file wins. A vendor class whose last two
-/// parts equal a project file (`Vendor\Lib\Thing` vs `Lib/Thing.php`) is a known false edge.
-fn resolve_php_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<String> {
+/// PHP class `App\Util\Fmt`. With composer's PSR-4 roots (`aliases` keys holding a backslash) it
+/// follows Composer: the longest matching root first, then shorter ones, the first file that
+/// exists wins, and a namespace under no root (a vendor package) makes no edge. Without any root
+/// it guesses `App/Util/Fmt.php`, or with leading namespace parts dropped (`src/Util/Fmt.php`),
+/// never below two parts; only a candidate matching exactly one file counts. That guess can link
+/// a vendor class to a project file with the same last two parts.
+fn resolve_php_class<V>(
+    files: &BTreeMap<String, V>,
+    aliases: &BTreeMap<String, String>,
+    imp: &str,
+) -> Option<String> {
+    let mut roots: Vec<(&String, &String)> =
+        aliases.iter().filter(|(p, _)| p.contains('\\')).collect();
+    if roots.is_empty() {
+        return guess_php_class(files, imp);
+    }
+    roots.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+    roots
+        .into_iter()
+        .filter(|(prefix, _)| imp.starts_with(prefix.as_str()))
+        .find_map(|(prefix, folders)| {
+            let rest = imp[prefix.len()..].replace('\\', "/");
+            folders
+                .split('|')
+                .map(|folder| format!("{folder}{rest}.php"))
+                .find(|path| files.contains_key(path))
+        })
+}
+
+fn guess_php_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<String> {
     let parts: Vec<&str> = imp.split('\\').filter(|p| !p.is_empty()).collect();
     (2..=parts.len()).rev().find_map(|n| {
-        single_suffix_match(
-            files,
-            &[format!("{}.php", parts[parts.len() - n..].join("/"))],
-        )
+        let path = format!("{}.php", parts[parts.len() - n..].join("/"));
+        single_suffix_match(files, &[path])
     })
 }
 
@@ -390,10 +413,13 @@ fn resolve_include<V>(files: &BTreeMap<String, V>, from: &str, imp: &str) -> Opt
 
 /// The one file that is, or sits below a folder ending in, one of `paths`; none when several match.
 fn single_suffix_match<V>(files: &BTreeMap<String, V>, paths: &[String]) -> Option<String> {
+    // Built once per call, not per file: this runs for every import of every file.
+    let tails: Vec<String> = paths.iter().map(|p| format!("/{p}")).collect();
     let mut hits = files.keys().filter(|f| {
         paths
             .iter()
-            .any(|p| f.as_str() == p || f.ends_with(&format!("/{p}")))
+            .zip(&tails)
+            .any(|(p, tail)| f.as_str() == p || f.ends_with(tail.as_str()))
     });
     let first = hits.next()?;
     hits.next().is_none().then(|| first.clone())
@@ -1103,6 +1129,52 @@ mod tests {
             ),
         ]);
         assert!(local_imports(&index, &index.files["main.php"]).is_empty());
+    }
+
+    #[test]
+    fn php_composer_roots_decide_what_is_a_project_class() {
+        let files: BTreeMap<String, ()> = [
+            "src/Model/Cart.php",
+            "lib/Thing.php",
+            "src/Illuminate/Support/Facades/Cache.php",
+            "src/Illuminate/Collections/Collection.php",
+        ]
+        .iter()
+        .map(|p| (p.to_string(), ()))
+        .collect();
+        let roots = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let aliases = roots(&[
+            ("App\\", "src/"),
+            ("Illuminate\\", "src/Illuminate/"),
+            (
+                "Illuminate\\Support\\",
+                "src/Illuminate/Macroable/|src/Illuminate/Collections/",
+            ),
+            ("@/", "src/"),
+        ]);
+        let hit = |imp: &str| resolve_php_class(&files, &aliases, imp);
+        assert_eq!(
+            hit("App\\Model\\Cart").as_deref(),
+            Some("src/Model/Cart.php")
+        );
+        // The vendor class shares its last two parts with a project file, but no root owns it.
+        assert_eq!(hit("Vendor\\Lib\\Thing"), None);
+        // The longest root has no such file; the shorter one does (Composer tries them in turn).
+        assert_eq!(
+            hit("Illuminate\\Support\\Facades\\Cache").as_deref(),
+            Some("src/Illuminate/Support/Facades/Cache.php")
+        );
+        // Several folders under one root.
+        assert_eq!(
+            hit("Illuminate\\Support\\Collection").as_deref(),
+            Some("src/Illuminate/Collections/Collection.php")
+        );
+        assert_eq!(hit("App\\Missing"), None);
     }
 
     #[test]

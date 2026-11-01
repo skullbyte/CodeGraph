@@ -353,9 +353,15 @@ const RUBY_MAGIC: [&str; 6] = [
     ":nodoc:",
 ];
 
-/// The block of `#` lines directly above a Ruby definition (an `=begin` block is not read).
+/// How many lines of a Ruby `=begin` block are searched for its start.
+const BEGIN_LOOKBACK: usize = 200;
+
+/// The block of `#` lines, or the `=begin`..`=end` block, directly above a Ruby definition.
 fn hash_comment_above(lines: &[&str], at: usize) -> Option<String> {
     let before = lines.get(..at)?;
+    if before.last().is_some_and(|l| l.trim_end() == "=end") {
+        return begin_block(before);
+    }
     let mut above: Vec<&str> = before
         .iter()
         .rev()
@@ -368,6 +374,23 @@ fn hash_comment_above(lines: &[&str], at: usize) -> Option<String> {
         .collect();
     above.reverse();
     tour::first_doc_text(&above, true)
+}
+
+/// The text of the `=begin` block that ends the given lines with `=end`, as if it were `#` lines.
+fn begin_block(before: &[&str]) -> Option<String> {
+    let end = before.len() - 1;
+    let from = end.saturating_sub(BEGIN_LOOKBACK);
+    // Another `=end` first means the one we started from has no `=begin` of its own.
+    let start = (from..end)
+        .rev()
+        .take_while(|&i| !before[i].starts_with("=end"))
+        .find(|&i| before[i].starts_with("=begin"))?;
+    let commented: Vec<String> = before[start + 1..end]
+        .iter()
+        .map(|l| format!("# {}", l.trim()))
+        .collect();
+    let as_hashes: Vec<&str> = commented.iter().map(String::as_str).collect();
+    tour::first_doc_text(&as_hashes, true)
 }
 
 /// The doc comment directly above `at`, stepping over attributes and decorators.
@@ -532,6 +555,34 @@ mod tests {
         // A blank line cuts the block: the comment further up is not this method's.
         assert_eq!(
             teach(dir.path(), &hit(10, "def bare")),
+            ["  terms: def = a method"]
+        );
+    }
+
+    #[test]
+    fn ruby_begin_end_block_is_a_doc_comment_too() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rb"),
+            "=begin\nAdds one.\nMore text.\n=end\ndef add(x)\nend\n=begin\n=end\ndef empty\nend\n=end\ndef stray\nend\n",
+        )
+        .unwrap();
+        let hit = |line, signature: &str| DefHit {
+            path: "a.rb".into(),
+            line,
+            signature: signature.into(),
+        };
+        assert_eq!(
+            teach(dir.path(), &hit(5, "def add(x)"))[1],
+            "  doc: Adds one."
+        );
+        assert_eq!(
+            teach(dir.path(), &hit(9, "def empty")),
+            ["  terms: def = a method"]
+        );
+        // An `=end` with no `=begin` above it is not a block.
+        assert_eq!(
+            teach(dir.path(), &hit(12, "def stray")),
             ["  terms: def = a method"]
         );
     }

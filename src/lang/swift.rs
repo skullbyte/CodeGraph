@@ -9,8 +9,9 @@ use super::{Facts, field_text};
 use crate::model::Kind;
 
 // `class_declaration` is also a struct, an enum, an actor or an extension; they all become classes
-// except the extension, which adds no symbol (its methods are still found). Known gap: calls in a
-// computed property (`var x: Int { compute() }`) have no caller.
+// except the extension, which adds no symbol (its methods are still found). A computed property
+// (`var x: Int { compute() }`) is a scope, so its calls belong to it; a stored property or a local
+// `let` is not (its `name` fn returns nothing), so those calls stay with the enclosing function.
 const CONFIG: Config = Config {
     items: &[
         ("class_declaration", Kind::Class),
@@ -23,7 +24,7 @@ const CONFIG: Config = Config {
         ("subscript_declaration", Kind::Fn),
     ],
     calls: &["call_expression", "constructor_expression"],
-    scopes: &[],
+    scopes: &["property_declaration"],
     name,
     callee,
     imports: |_, _, _| {},
@@ -39,6 +40,9 @@ fn name(node: Node, src: &str) -> Vec<String> {
     match node.kind() {
         "deinit_declaration" => vec!["deinit".to_string()],
         "subscript_declaration" => vec!["subscript".to_string()],
+        "property_declaration" if node.child_by_field_name("computed_value").is_none() => {
+            Vec::new()
+        }
         "class_declaration" if field_text(node, "declaration_kind", src) == Some("extension") => {
             Vec::new()
         }
@@ -224,6 +228,32 @@ func run() { Store().add(2) }
                 ("dup", Some("twice")),
             ]
         );
+    }
+
+    #[test]
+    fn computed_properties_own_their_calls_but_stored_ones_and_locals_do_not() {
+        let facts = extract_file(
+            Lang::Swift,
+            "struct S {\n    var total: Int { compute() }\n    var both: Int { get { a() } set { b() } }\n    let stored = other()\n    func f() { let x = g() }\n}\n",
+        )
+        .unwrap();
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.caller.as_deref()))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("compute", Some("total")),
+                ("a", Some("both")),
+                ("b", Some("both")),
+                ("other", None),
+                ("g", Some("f")),
+            ]
+        );
+        let symbols: Vec<_> = facts.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(symbols, vec!["S", "f"], "properties are not symbols");
     }
 
     #[test]

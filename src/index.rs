@@ -77,6 +77,55 @@ pub fn lock(root: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
+/// All import aliases of a project: tsconfig's (TypeScript) and composer's (PHP).
+fn import_aliases(root: &Path) -> BTreeMap<String, String> {
+    let mut aliases = tsconfig_aliases(root);
+    aliases.extend(composer_aliases(root));
+    aliases
+}
+
+/// PSR-4 namespace roots from composer.json (`autoload` and `autoload-dev`): `"App\\": "src/"`
+/// becomes `"App\\"` -> `"src/"`; several folders are joined with `|`. A PHP prefix holds a
+/// backslash, so it never collides with a TypeScript alias in the same map.
+fn composer_aliases(root: &Path) -> BTreeMap<String, String> {
+    let mut folders: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let Ok(raw) = fs::read_to_string(root.join("composer.json")) else {
+        return BTreeMap::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return BTreeMap::new();
+    };
+    for section in ["autoload", "autoload-dev"] {
+        let Some(map) = json[section]["psr-4"].as_object() else {
+            continue;
+        };
+        for (prefix, target) in map {
+            if !prefix.ends_with('\\') {
+                continue; // the root namespace ("") or a malformed key names no folder
+            }
+            let targets = match target {
+                serde_json::Value::String(one) => vec![one.as_str()],
+                serde_json::Value::Array(many) => many.iter().filter_map(|t| t.as_str()).collect(),
+                _ => continue,
+            };
+            for dir in targets {
+                let dir = query::normalize(dir);
+                let folder = if dir.is_empty() {
+                    dir
+                } else {
+                    format!("{dir}/")
+                };
+                folders.entry(prefix.clone()).or_default().push(folder);
+            }
+        }
+    }
+    // The project root is the folder "", so a list cannot be told apart from "no folder" by emptiness.
+    folders
+        .into_iter()
+        .map(|(prefix, list)| (prefix, list.join("|")))
+        .collect()
+}
+
 /// Import aliases from `compilerOptions.paths` in tsconfig.json, e.g. `"@/*": ["./src/*"]` becomes
 /// `"@/"` -> `"src/"`. With no tsconfig at all, `@/` -> `src/` (the common default).
 /// tsconfig allows comments and trailing commas, so clean those first.
@@ -215,7 +264,7 @@ pub fn build(root: &Path, previous: Option<&Index>) -> Result<(Index, Stats)> {
     let mut index = Index {
         version: VERSION,
         extractor: fingerprint(),
-        aliases: tsconfig_aliases(root),
+        aliases: import_aliases(root),
         files: Default::default(),
     };
     let mut stats = Stats::default();
@@ -236,8 +285,8 @@ pub fn build(root: &Path, previous: Option<&Index>) -> Result<(Index, Stats)> {
 
 /// Re-index a single file in place; a file that is gone (or unsupported) is dropped.
 pub fn update_file(root: &Path, index: &mut Index, rel: &str) -> Result<()> {
-    // tsconfig.json isn't an indexed file, so refresh its aliases on every update.
-    index.aliases = tsconfig_aliases(root);
+    // tsconfig.json and composer.json aren't indexed files, so refresh their aliases on every update.
+    index.aliases = import_aliases(root);
     if !walk::is_indexable(root, rel) || !root.join(rel).is_file() {
         index.files.remove(rel);
         return Ok(());
@@ -449,6 +498,32 @@ mod tests {
             let want: serde_json::Value = serde_json::from_str(want).unwrap();
             assert_eq!(got, want, "input: {input}");
         }
+    }
+
+    #[test]
+    fn composer_psr4_roots_become_aliases_with_several_folders_joined() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("composer.json"),
+            r#"{"autoload":{"psr-4":{"App\\":"src/","Lib\\":["a/","./b"],"Root\\":[".","src/"],"":"x/","Bad":"y/"}},
+                "autoload-dev":{"psr-4":{"App\\":"tests/"}}}"#,
+        )
+        .unwrap();
+        let aliases = composer_aliases(root);
+        assert_eq!(
+            aliases.get("App\\").map(String::as_str),
+            Some("src/|tests/")
+        );
+        assert_eq!(aliases.get("Lib\\").map(String::as_str), Some("a/|b/"));
+        // The project root is a folder too: it must survive next to another folder.
+        assert_eq!(aliases.get("Root\\").map(String::as_str), Some("|src/"));
+        assert_eq!(
+            aliases.len(),
+            3,
+            "root namespace and keys without a backslash are skipped"
+        );
+        assert!(composer_aliases(&root.join("missing")).is_empty());
     }
 
     #[test]

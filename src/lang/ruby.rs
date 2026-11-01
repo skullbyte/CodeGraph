@@ -23,7 +23,30 @@ const CONFIG: Config = Config {
 };
 
 pub fn extract(root: Node, src: &str) -> Facts {
-    super::generic::extract(root, src, &CONFIG)
+    let mut facts = super::generic::extract(root, src, &CONFIG);
+    for symbol in &mut facts.symbols {
+        symbol.signature = without_comment(&symbol.signature);
+    }
+    facts
+}
+
+/// `def f(x) # :nodoc` -> `def f(x)`: a `#` after whitespace and outside quotes starts a comment.
+fn without_comment(signature: &str) -> String {
+    let mut quote = None;
+    let mut previous = ' ';
+    for (at, c) in signature.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '#' && previous.is_whitespace() => {
+                return signature[..at].trim_end().to_string();
+            }
+            None => {}
+        }
+        previous = c;
+    }
+    signature.to_string()
 }
 
 /// The `name` field; `class A::B` is named `B`, the way a call to it would write it.
@@ -150,6 +173,20 @@ def run; Store.new.add(1); end
                 ("each", Some("y")),
                 ("log", Some("y")),
             ]
+        );
+    }
+
+    #[test]
+    fn a_trailing_comment_is_not_part_of_the_signature() {
+        let facts = extract_file(
+            Lang::Ruby,
+            "def find_by(*args) # :nodoc\n  x\nend\ndef f(x = \"#a\", y = '#b') # note\n  x\nend\n",
+        )
+        .unwrap();
+        let sigs: Vec<_> = facts.symbols.iter().map(|s| s.signature.as_str()).collect();
+        assert_eq!(
+            sigs,
+            vec!["def find_by(*args)", "def f(x = \"#a\", y = '#b')"]
         );
     }
 
