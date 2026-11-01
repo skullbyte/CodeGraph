@@ -3,12 +3,12 @@
 //! a definition in its own file, else in a file it imports, else in its own folder (same package).
 //! Ours; Graphify resolves per language with receiver types, which comes after this.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::lang::Lang;
-use crate::model::{Call, Form, Hop, Index, Ret};
+use crate::model::{Call, Form, Hop, Index, Kind, Ret};
 use crate::query;
-use crate::usepath::UsePaths;
+use crate::usepath::{UsePaths, plain_type};
 
 /// A project definition: file, 1-based line (as SCIP names it) and the type or trait it is in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -41,6 +41,12 @@ pub struct Resolver {
     by_name: HashMap<String, Vec<Def>>,
     /// Rust `use` paths and re-exports.
     paths: UsePaths,
+    /// Names of traits (any language): their default methods are what extension traits add.
+    traits: HashSet<String>,
+    /// Names declared as a type alias somewhere: an alias hides what its target type implements.
+    aliased: HashSet<String>,
+    /// Names declared as a struct, enum or class: the only kinds an extension trait is added to.
+    nominal: HashSet<String>,
 }
 
 /// Longest call chain followed; a longer one is read as a plain method call.
@@ -65,8 +71,20 @@ impl Resolver {
             targets.remove(file); // `from . import x` can resolve to the file itself
         }
         let mut by_name: HashMap<String, Vec<Def>> = HashMap::new();
+        let mut traits = HashSet::new();
+        let mut aliased = HashSet::new();
+        let mut nominal = HashSet::new();
         for file in index.files.values() {
             for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
+                if s.kind == Kind::Trait {
+                    traits.insert(s.name.clone());
+                }
+                if s.kind == Kind::Type {
+                    aliased.insert(s.name.clone());
+                }
+                if matches!(s.kind, Kind::Struct | Kind::Enum | Kind::Class) {
+                    nominal.insert(s.name.clone());
+                }
                 by_name.entry(s.name.clone()).or_default().push(Def {
                     path: file.path.clone(),
                     line: s.line,
@@ -79,6 +97,9 @@ impl Resolver {
             imports: imports.into_iter().collect(),
             by_name,
             paths: UsePaths::new(index),
+            traits,
+            aliased,
+            nominal,
         }
     }
 
@@ -97,7 +118,7 @@ impl Resolver {
                 let ty = self.hop_type(from, inner, owner, depth + 1)?;
                 members_of(defs, &ty)
             }
-            Form::Type(ty) => members_of(defs, ty),
+            Form::Type(ty) => members_of(defs, plain_type(ty)),
             // The wider fallback of `resolve_form` may not decide a type: keep real matches only.
             Form::SelfRef => owner.map_or_else(Vec::new, |o| members_of(defs, o)),
             Form::Bare | Form::Module(_) => self
@@ -162,6 +183,7 @@ impl Resolver {
             Form::Returned(hop) => match self.hop_type(from, hop, owner, depth) {
                 Some(t) => match of_type(&t) {
                     members if !members.is_empty() => members,
+                    // Not the trait fallback: a returned `Spawn<T>` reaches `T`'s methods by deref.
                     _ => self.resolve_form(from, name, &Form::Method, owner, defs, depth),
                 },
                 None => self.resolve_form(from, name, &Form::Method, owner, defs, depth),
@@ -169,20 +191,26 @@ impl Resolver {
             Form::Unknown => all(),
             Form::SelfRef => owner.map_or_else(all, |o| narrowed(of_type(o))),
             Form::Type(t) => {
-                let members = of_type(t);
+                let members = of_type(plain_type(t));
                 // Drop members of other packages that define their own type of this name; keep
                 // the rest, since a trait impl elsewhere can add members to the imported type.
                 let rivals = self.paths.rival_packages(from, t);
+                let rival_files = self.paths.rival_files(from, t);
                 let inside: Vec<usize> = members
                     .iter()
                     .copied()
+                    .filter(|&i| !rival_files.contains(&defs[i].path))
                     .filter(|&i| {
                         self.paths
                             .package_folder_of(&defs[i].path)
                             .is_none_or(|p| !rivals.iter().any(|r| r == p))
                     })
                     .collect();
-                narrowed(if inside.is_empty() { members } else { inside })
+                match (inside.is_empty(), members.is_empty()) {
+                    (false, _) => inside,
+                    (true, false) => members,
+                    (true, true) => narrowed(self.trait_members(from, name, t, defs)),
+                }
             }
             Form::Method => narrowed(
                 (0..defs.len())
@@ -226,6 +254,67 @@ impl Resolver {
                 self.narrow_among(from, defs, set)
             }
         }
+    }
+
+    /// A project type `ty` that has no member `f` of its own may get it from a trait (an extension
+    /// trait such as `AsyncReadExt`): the definitions inside traits. Empty for a type the project
+    /// does not define, where the method is the library's. Rust only (a PHP/TS class inherits
+    /// statics from its parent), and only when every definition of the name sits in a trait or a
+    /// project type: a blanket `impl<T> Ext for T` or `impl Ext for Box<Foo>` has a container we
+    /// cannot tie to `ty`, so nothing is ruled out then.
+    fn trait_members(&self, from: &str, name: &str, written: &str, defs: &[Def]) -> Vec<usize> {
+        // Derives and std traits make these without any definition in the project.
+        const STD_NAMES: &[&str] = &[
+            "default",
+            "clone",
+            "from",
+            "into",
+            "fmt",
+            "eq",
+            "cmp",
+            "hash",
+            "partial_cmp",
+            "drop",
+            "try_from",
+            "to_string",
+            "ne",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "max",
+            "min",
+            "clamp",
+            "clone_from",
+            "to_owned",
+            "borrow",
+            "as_ref",
+            "type_id",
+            "try_into",
+            "borrow_mut",
+        ];
+        let ty = plain_type(written);
+        let known = |c: &String| self.traits.contains(c) || self.nominal.contains(c);
+        let opaque = defs
+            .iter()
+            .any(|d| d.container.as_ref().is_some_and(|c| !known(c)));
+        if !from.ends_with(".rs")
+            || STD_NAMES.contains(&name)
+            || self.paths.type_files(from, written).is_empty()
+            || opaque
+            || !self.nominal.contains(ty)
+            || self.aliased.contains(ty)
+        {
+            return Vec::new();
+        }
+        (0..defs.len())
+            .filter(|&i| {
+                defs[i]
+                    .container
+                    .as_ref()
+                    .is_some_and(|c| self.traits.contains(c))
+            })
+            .collect()
     }
 
     /// `narrow`, but only among the definitions at positions `subset`.
@@ -569,6 +658,131 @@ mod tests {
         assert!(
             got.contains(&1),
             "the imported package's member stays: {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_project_type_without_the_member_gets_it_from_a_trait() {
+        use crate::model::{Kind, Symbol};
+        let sym = |name: &str, kind: Kind| Symbol {
+            name: name.into(),
+            kind,
+            line: 1,
+            signature: String::new(),
+            container: None,
+            returns: None,
+        };
+        let r = Resolver::new(&index(vec![FileEntry {
+            path: "t.rs".into(),
+            symbols: vec![
+                sym("Ext", Kind::Trait),
+                sym("TcpStream", Kind::Struct),
+                sym("Other", Kind::Struct),
+                sym("Cursor", Kind::Struct),
+            ],
+            ..Default::default()
+        }]));
+        let d = vec![
+            in_type("ext.rs", 1, "Ext"),
+            in_type("other.rs", 2, "Other"),
+            in_type("tcp.rs", 3, "Cursor"),
+        ];
+        let go = |ty: &str| r.resolve("t.rs", &call(Form::Type(ty.into()), None), &d);
+        assert_eq!(go("TcpStream"), vec![0], "extension trait method");
+        let blanket = vec![in_type("ext.rs", 1, "Ext"), in_type("blanket.rs", 2, "T")];
+        let c = call(Form::Type("TcpStream".into()), None);
+        assert_eq!(
+            r.resolve("t.rs", &c, &blanket),
+            vec![0, 1],
+            "`impl<T> Ext for T`: nothing is ruled out"
+        );
+        assert_eq!(
+            r.resolve("t.php", &c, &d),
+            vec![0, 1, 2],
+            "not Rust: no trait fallback"
+        );
+        assert_eq!(
+            go("Vec"),
+            vec![0, 1, 2],
+            "a library type: nothing is ruled out"
+        );
+        assert_eq!(go("Other"), vec![1], "its own member wins");
+        let c = call(Form::Type("TcpStream".into()), None);
+        let mut std = c.clone();
+        std.callee = "default".into();
+        assert_eq!(r.resolve("t.rs", &std, &d), vec![0, 1, 2], "derivable name");
+        let foreign = Resolver::new(&index(vec![FileEntry {
+            path: "t.rs".into(),
+            symbols: vec![sym("Ext", Kind::Trait), sym("Other", Kind::Struct)],
+            uses: vec![crate::model::Use {
+                alias: "Cursor".into(),
+                path: "serde::Cursor".into(),
+                public: false,
+                local: false,
+            }],
+            ..Default::default()
+        }]));
+        let c = call(Form::Type("Cursor".into()), None);
+        assert_eq!(
+            foreign.resolve("t.rs", &c, &d[..2]),
+            vec![0, 1],
+            "unfollowable import"
+        );
+        let aliased = Resolver::new(&index(vec![FileEntry {
+            path: "t.rs".into(),
+            symbols: vec![sym("Ext", Kind::Trait), sym("Drv", Kind::Type)],
+            ..Default::default()
+        }]));
+        let c = call(Form::Type("Drv".into()), None);
+        assert_eq!(
+            aliased.resolve("t.rs", &c, &d),
+            vec![0, 1, 2],
+            "a type alias"
+        );
+    }
+
+    #[test]
+    fn qualified_type_paths_narrow_by_file_and_unfollowable_ones_keep_all() {
+        use crate::model::{Kind, Symbol, Use};
+        let strukt = |path: &str, uses: Vec<Use>| FileEntry {
+            path: path.into(),
+            uses,
+            symbols: vec![Symbol {
+                name: "D".into(),
+                kind: Kind::Struct,
+                line: 1,
+                signature: String::new(),
+                container: None,
+                returns: None,
+            }],
+            ..Default::default()
+        };
+        let io = Use {
+            alias: "io".into(),
+            path: "crate::io".into(),
+            public: false,
+            local: false,
+        };
+        let r = Resolver::new(&index(vec![
+            FileEntry {
+                path: "p/src/lib.rs".into(),
+                ..Default::default()
+            },
+            strukt("p/src/io.rs", vec![]),
+            strukt("p/src/d.rs", vec![io]),
+        ]));
+        let d = vec![
+            in_type("p/src/io.rs", 1, "D"),
+            in_type("p/src/d.rs", 2, "D"),
+        ];
+        let go = |t: &str| r.resolve("p/src/d.rs", &call(Form::Type(t.into()), None), &d);
+        assert_eq!(go("io::D"), vec![0], "the module path picks the imported D");
+        assert_eq!(go("D"), vec![1], "unqualified: the file's own D");
+        assert_eq!(go("nope::D"), vec![0, 1], "unfollowable: nothing ruled out");
+        assert_eq!(
+            go("Self::Item"),
+            vec![0, 1],
+            "an associated type says nothing"
         );
     }
 

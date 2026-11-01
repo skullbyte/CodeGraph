@@ -36,6 +36,10 @@ pub struct UsePaths {
     files: HashSet<String>,
     /// Top-level name -> package folders that define it.
     homes: HashMap<String, Vec<String>>,
+    /// Top-level name -> files that define it.
+    defined_in: HashMap<String, Vec<String>>,
+    /// File -> names it declares as a type alias.
+    aliases: HashMap<String, HashSet<String>>,
 }
 
 fn is_rust(path: &str) -> bool {
@@ -94,18 +98,35 @@ impl UsePaths {
         // A library is what other crates name, so it comes before a binary of the same package.
         crates.sort_by_key(|c| (c.root.ends_with("main.rs"), c.root.clone()));
         let mut homes: HashMap<String, Vec<String>> = HashMap::new();
+        let mut defined_in: HashMap<String, Vec<String>> = HashMap::new();
+        // Type aliases (`type S = a::S;`) are not a second type: they never make a rival.
+        let aliases: HashMap<String, HashSet<String>> = index
+            .files
+            .values()
+            .map(|f| {
+                let names = f.symbols.iter().filter(|s| s.kind == Kind::Type);
+                (f.path.clone(), names.map(|s| s.name.clone()).collect())
+            })
+            .collect();
         let mut paths = UsePaths {
             crates,
             uses,
             names,
             files,
             homes: HashMap::new(),
+            defined_in: HashMap::new(),
+            aliases: HashMap::new(),
         };
         for (file, defined) in &paths.names {
+            let alias = |n: &String| aliases.get(file).is_some_and(|a| a.contains(n));
             let Some(package) = paths.package_of(file).map(|c| c.package.clone()) else {
                 continue;
             };
-            for name in defined {
+            for name in defined.iter().filter(|n| !alias(n)) {
+                defined_in
+                    .entry(name.clone())
+                    .or_default()
+                    .push(file.clone());
                 homes.entry(name.clone()).or_default().push(package.clone());
             }
         }
@@ -114,6 +135,8 @@ impl UsePaths {
             v.dedup();
         });
         paths.homes = homes;
+        paths.defined_in = defined_in;
+        paths.aliases = aliases;
         paths
     }
 
@@ -281,6 +304,11 @@ impl UsePaths {
         if self.names.get(from).is_some_and(|n| n.contains(name)) {
             return Vec::new(); // the file's own definition wins over any import
         }
+        self.use_files(from, name)
+    }
+
+    /// Files where `from`'s `use` of `name` leads (no own-definition check).
+    fn use_files(&self, from: &str, name: &str) -> Vec<String> {
         let uses = self.uses_of(from, name);
         if uses.iter().any(|u| u.local) {
             return Vec::new(); // a use in a mod or fn may shadow the file-level one
@@ -320,6 +348,43 @@ impl UsePaths {
         Some(module)
     }
 
+    /// Files that define the type `from` means by `ty`: where its `use` leads, plus its own file
+    /// when it defines one (that may be a nested `struct S` next to an imported `S`, so both stay).
+    pub fn type_files(&self, from: &str, ty: &str) -> Vec<String> {
+        if ty.contains("::") {
+            return self.qualified_files(from, ty);
+        }
+        let alias = self.aliases.get(from).is_some_and(|a| a.contains(ty));
+        let own = !alias && self.names.get(from).is_some_and(|n| n.contains(ty));
+        let mut files = self.use_files(from, ty);
+        if own && files.is_empty() && !self.uses_of(from, ty).is_empty() {
+            return Vec::new(); // an import we cannot follow may be the real type
+        }
+        if own {
+            files.push(from.to_string());
+        }
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    /// Files of a type written with its module path (`io::Driver`, `crate::a::T`): the first
+    /// segment may be a `use` alias of a module; a path we cannot follow gives nothing.
+    fn qualified_files(&self, from: &str, path: &str) -> Vec<String> {
+        let (first, rest) = path.split_once("::").unwrap_or((path, ""));
+        let uses = self.uses_of(from, first);
+        if uses.iter().any(|u| u.local) {
+            return Vec::new();
+        }
+        if uses.is_empty() {
+            return self.item_files(from, path, 0);
+        }
+        union_of_all(
+            uses.iter()
+                .map(|u| self.item_files(from, &format!("{}::{rest}", u.path), 0)),
+        )
+    }
+
     /// Package folders that define a different type named `ty` than the one `from` imported.
     /// Other packages may still add members to the imported one (`impl Trait for Bld`).
     pub fn rival_packages(&self, from: &str, ty: &str) -> Vec<String> {
@@ -327,8 +392,33 @@ impl UsePaths {
         if mine.is_empty() {
             return Vec::new();
         }
-        let all = self.homes.get(ty).map_or(&[][..], Vec::as_slice);
+        let all = self
+            .homes
+            .get(plain_type(ty))
+            .map_or(&[][..], Vec::as_slice);
         all.iter().filter(|p| !mine.contains(p)).cloned().collect()
+    }
+
+    /// Files that define a different type named `ty` than the one `from` imported (same package
+    /// included: `batch_semaphore::Semaphore` vs `semaphore::Semaphore`).
+    pub fn rival_files(&self, from: &str, ty: &str) -> Vec<String> {
+        let mine = self.type_files(from, ty);
+        if mine.is_empty() {
+            return Vec::new();
+        }
+        let all = self
+            .defined_in
+            .get(plain_type(ty))
+            .map_or(&[][..], Vec::as_slice);
+        all.iter()
+            .filter(|f| !mine.contains(f))
+            // A file that also imports the type we mean may hold impls of it: not a rival.
+            .filter(|f| {
+                let theirs = self.type_files(f, plain_type(ty));
+                !theirs.iter().any(|t| mine.contains(t))
+            })
+            .cloned()
+            .collect()
     }
 
     /// The package folder (`tokio/`) that holds a file: the longest one, so nested packages differ.
@@ -339,7 +429,7 @@ impl UsePaths {
     /// The package folders (`tokio/`) that define type `ty` when `from` imported it.
     pub fn type_packages(&self, from: &str, ty: &str) -> Vec<String> {
         let mut packages: Vec<String> = self
-            .bare(from, ty)
+            .type_files(from, ty)
             .iter()
             .filter_map(|file| Some(self.package_of(file)?.package.clone()))
             .collect();
@@ -347,6 +437,11 @@ impl UsePaths {
         packages.dedup();
         packages
     }
+}
+
+/// The type name of a possibly qualified one: `io::Driver` -> `Driver`.
+pub fn plain_type(ty: &str) -> &str {
+    ty.rsplit("::").next().unwrap_or(ty)
 }
 
 /// The files of every answer, or nothing when any answer is empty: one unfollowable `use` of a
@@ -645,5 +740,114 @@ mod tests {
         assert_eq!(w.package_folder_of("tok/sub/src/x.rs"), Some("tok/sub/"));
         assert_eq!(w.package_folder_of("tok/src/x.rs"), Some("tok/"));
         assert_eq!(w.package_folder_of("elsewhere/x.rs"), None);
+    }
+
+    #[test]
+    fn two_types_of_one_name_in_one_package_are_rivals_by_file() {
+        let w = paths(vec![
+            file("p/src/lib.rs", &[], &[]),
+            file("p/src/a.rs", &[], &[("S", Kind::Struct)]),
+            file("p/src/b.rs", &[], &[("S", Kind::Struct)]),
+            file("app/src/main.rs", &[("S", "p::a::S", false)], &[]),
+        ]);
+        assert_eq!(w.rival_files("app/src/main.rs", "S"), vec!["p/src/b.rs"]);
+        assert!(w.rival_files("nowhere.rs", "S").is_empty());
+    }
+
+    #[test]
+    fn a_type_defined_in_the_callers_own_file_beats_other_files() {
+        let w = paths(vec![
+            file("p/src/lib.rs", &[], &[]),
+            file("p/src/a.rs", &[], &[("S", Kind::Struct)]),
+            file("p/src/b.rs", &[], &[("S", Kind::Struct)]),
+        ]);
+        assert_eq!(w.rival_files("p/src/a.rs", "S"), vec!["p/src/b.rs"]);
+    }
+
+    #[test]
+    fn a_qualified_type_follows_its_module_path_and_ignores_the_own_file() {
+        let w = paths(vec![
+            file("p/src/lib.rs", &[], &[]),
+            file("p/src/io.rs", &[], &[("D", Kind::Struct)]),
+            file(
+                "p/src/d.rs",
+                &[("io", "crate::io", false)],
+                &[("D", Kind::Enum)],
+            ),
+        ]);
+        assert_eq!(w.type_files("p/src/d.rs", "io::D"), vec!["p/src/io.rs"]);
+        assert_eq!(w.rival_files("p/src/d.rs", "io::D"), vec!["p/src/d.rs"]);
+        assert_eq!(w.type_files("p/src/d.rs", "D"), vec!["p/src/d.rs"]);
+        assert!(w.type_files("p/src/d.rs", "nope::D").is_empty());
+    }
+
+    #[test]
+    fn an_imported_type_and_a_nested_one_of_the_same_name_both_count() {
+        let w = paths(vec![
+            file("p/src/lib.rs", &[], &[]),
+            file("p/src/real.rs", &[], &[("S", Kind::Struct)]),
+            file(
+                "p/src/a.rs",
+                &[("S", "crate::real::S", false)],
+                &[("S", Kind::Struct)],
+            ),
+        ]);
+        assert_eq!(
+            w.type_files("p/src/a.rs", "S"),
+            vec!["p/src/a.rs", "p/src/real.rs"]
+        );
+        assert!(w.rival_files("p/src/a.rs", "S").is_empty());
+    }
+
+    #[test]
+    fn an_unfollowable_import_next_to_an_own_type_gives_nothing() {
+        let w = paths(vec![
+            file("p/src/lib.rs", &[], &[]),
+            file(
+                "p/src/a.rs",
+                &[("S", "serde::S", false)],
+                &[("S", Kind::Struct)],
+            ),
+        ]);
+        assert!(w.type_files("p/src/a.rs", "S").is_empty());
+    }
+
+    #[test]
+    fn a_file_that_imports_our_type_is_not_a_rival() {
+        let w = paths(vec![
+            file("p/src/lib.rs", &[], &[]),
+            file("p/src/a.rs", &[], &[("S", Kind::Struct)]),
+            file(
+                "p/src/b.rs",
+                &[("S", "crate::a::S", false)],
+                &[("S", Kind::Struct)],
+            ),
+            file("p/src/c.rs", &[], &[("S", Kind::Struct)]),
+            file("app/src/main.rs", &[("S", "p::a::S", false)], &[]),
+        ]);
+        assert_eq!(w.rival_files("app/src/main.rs", "S"), vec!["p/src/c.rs"]);
+    }
+
+    #[test]
+    fn a_type_alias_is_not_a_rival_type() {
+        let w = paths(vec![
+            file("p/src/lib.rs", &[], &[]),
+            file("p/src/a.rs", &[], &[("S", Kind::Struct)]),
+            file("p/src/b.rs", &[], &[("S", Kind::Type)]),
+            file("app/src/main.rs", &[("S", "p::a::S", false)], &[]),
+        ]);
+        assert!(w.rival_files("app/src/main.rs", "S").is_empty());
+    }
+
+    #[test]
+    fn an_alias_in_the_callers_file_is_not_its_own_type() {
+        let w = paths(vec![
+            file("p/src/lib.rs", &[], &[]),
+            file("p/src/a.rs", &[], &[("S", Kind::Struct)]),
+            file("p/src/me.rs", &[], &[("S", Kind::Type)]),
+            file("p/src/t.rs", &[], &[]),
+        ]);
+        assert!(w.type_files("p/src/me.rs", "S").is_empty());
+        assert!(w.rival_files("p/src/me.rs", "S").is_empty());
     }
 }

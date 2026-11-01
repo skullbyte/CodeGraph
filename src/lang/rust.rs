@@ -468,7 +468,24 @@ fn form_of(f: Node, src: &str, ctx: Ctx, depth: usize) -> Form {
                 return Form::Unknown; // `<T as Trait>::f`, `<Foo>::f`
             }
             let qualifier = path.map(|p| type_name(text(p, src)));
-            qualified(qualifier)
+            match (qualified(qualifier), path.map(|p| type_path(text(p, src)))) {
+                // Keep the module path of `io::Driver::new()`: two types may share the name.
+                // `Self::Item::f()`: an associated type, not a type named `Item`.
+                // `::a::T::f()` names a crate `a`; a local `mod a` could shadow it in our lookup.
+                (Form::Type(_), Some(full))
+                    if full.split("::").any(|s| s == "Self") || full.starts_with("::") =>
+                {
+                    Form::Unknown
+                }
+                // `a::Foo<T>::Assoc::f()`: generics mid-path, the receiver is an associated type.
+                (Form::Type(_), _) if path.is_some_and(|p| text(p, src).contains(">::")) => {
+                    Form::Unknown
+                }
+                (Form::Type(_), Some(full)) if full.contains("::") => {
+                    Form::Type(full.split_whitespace().collect())
+                }
+                (form, _) => form,
+            }
         }
         _ => Form::Unknown,
     }
@@ -951,6 +968,27 @@ fn outer() {
     }
 
     #[test]
+    fn qualified_type_paths_keep_their_modules() {
+        let src =
+            "fn f() { a::T::one(); Vec::<u8>::two(); a::Vec::<u8>::three(); Self::Item::four(); }";
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        let got: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.form.clone()))
+            .collect();
+        let ty = |t: &str| Form::Type(t.to_string());
+        assert_eq!(got[0], ("one", ty("a::T")));
+        let assoc = extract_file(Lang::Rust, "fn f() { a::Foo<T>::Assoc::g(); }").unwrap();
+        assert_eq!(assoc.calls[0].form, Form::Unknown);
+        let leading = extract_file(Lang::Rust, "fn f() { ::a::T::g(); }").unwrap();
+        assert_eq!(leading.calls[0].form, Form::Unknown);
+        assert_eq!(got[1], ("two", ty("Vec")));
+        assert_eq!(got[2], ("three", ty("a::Vec")));
+        assert_eq!(got[3], ("four", Form::Unknown));
+    }
+
+    #[test]
     fn symbols() {
         let facts = extract_file(Lang::Rust, SRC).unwrap();
         let got: Vec<_> = facts
@@ -1013,7 +1051,7 @@ fn outer() {
                 ("f", Form::Method, Some("Foo")),
                 ("g", Form::Bare, Some("Foo")),
                 ("new", ty("Vec"), Some("Foo")),
-                ("q", ty("Baz"), Some("Foo")),
+                ("q", ty("a::b::Baz"), Some("Foo")),
                 ("u", Form::SelfRef, Some("Tr")),
                 ("h", Form::Bare, None),
             ]
