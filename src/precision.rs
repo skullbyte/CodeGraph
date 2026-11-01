@@ -152,6 +152,10 @@ pub fn measure(index: &Index) -> Report {
                 report.unscored += 1;
                 continue;
             };
+            if separate_crates(&file.path, path) {
+                report.unscored += 1;
+                continue;
+            }
             report.truth += 1;
             for ((name, pick), score) in STRATEGIES.iter().zip(&mut report.scores) {
                 let picked = pick(&resolver, file, call, candidates);
@@ -174,6 +178,76 @@ pub fn measure(index: &Index) -> Report {
         }
     }
     report
+}
+
+/// Cargo builds each file directly inside `benches/`, `tests/` or `examples/` as its own crate, so
+/// two different ones cannot call each other; an index that says they do has merged same-named
+/// items (rust-analyzer does for tokio's benches). Such answers are not scored.
+fn separate_crates(from: &str, to: &str) -> bool {
+    let single = |path: &str| {
+        let mut parts = path.rsplit('/');
+        let file = parts.next().unwrap_or("");
+        let dir = parts.next();
+        let above = parts.next();
+        file.ends_with(".rs")
+            && matches!(dir, Some("benches" | "tests" | "examples"))
+            && above != Some("src") // `src/tests/a.rs` is a module of the crate
+    };
+    from != to && single(from) && single(to)
+}
+
+/// Up to `limit` calls per form kind that the `form` strategy did not pin to one right definition,
+/// one line each: where it is, how it is written, what was picked and what SCIP says.
+pub fn misses(index: &Index, limit: usize) -> Vec<String> {
+    let defs = definitions(index);
+    let resolver = Resolver::new(index);
+    let mut shown: HashMap<&'static str, usize> = HashMap::new();
+    let mut out = Vec::new();
+    for file in index.files.values().filter(|f| !f.is_doc()) {
+        for (i, call) in file.calls.iter().enumerate() {
+            let Some(candidates) = defs.get(call.callee.as_str()).filter(|c| c.len() > 1) else {
+                continue;
+            };
+            let Some(Resolution::Def { path, line }) = file.resolution(i) else {
+                continue;
+            };
+            let Some(truth) = candidates
+                .iter()
+                .position(|d| d.path == *path && d.line == *line)
+            else {
+                continue;
+            };
+            if separate_crates(&file.path, path) {
+                continue;
+            }
+            let picked = resolver.resolve(&file.path, call, candidates);
+            if picked == [truth] {
+                continue;
+            }
+            let kind = form_kind(&call.form);
+            let count = shown.entry(kind).or_default();
+            if *count >= limit {
+                continue;
+            }
+            *count += 1;
+            let at = |d: &Def| format!("{}:{}", d.path, d.line);
+            let names: Vec<String> = picked.iter().take(3).map(|&p| at(&candidates[p])).collect();
+            out.push(format!(
+                "{kind} {}:{} {} {:?} owner={:?}: picked {}/{} [{}{}], SCIP {}",
+                file.path,
+                call.line,
+                call.callee,
+                call.form,
+                call.owner,
+                picked.len(),
+                candidates.len(),
+                names.join(" "),
+                if picked.len() > 3 { " ..." } else { "" },
+                at(&candidates[truth])
+            ));
+        }
+    }
+    out
 }
 
 /// The kind of a call form, for the breakdown.
@@ -493,5 +567,44 @@ mod tests {
         assert!(r.by_form.iter().all(|s| s.total() > 0));
         let text = r.lines().join("\n");
         assert!(text.contains("`form` by how the call is written"), "{text}");
+    }
+
+    #[test]
+    fn misses_list_calls_the_form_strategy_did_not_pin_down() {
+        let all = misses(&sample(), 5);
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert!(
+            all[0].contains("main.rs:2") && all[0].contains("new") && all[0].contains("b.rs:1")
+        );
+        assert_eq!(misses(&sample(), 1).len(), 1, "capped per kind of form");
+        assert!(misses(&sample(), 0).is_empty());
+    }
+
+    #[test]
+    fn calls_between_separate_single_file_crates_are_not_scored() {
+        // Each file directly in `benches/` is its own crate: SCIP merging their `rt` is its quirk.
+        let mut a = file("benches/a.rs", vec![symbol("rt", 1)], vec![call("rt", 5)]);
+        a.resolved = vec![ResolvedCall {
+            call: 0,
+            target: Resolution::Def {
+                path: "benches/b.rs".into(),
+                line: 9,
+            },
+        }];
+        let b = file("benches/b.rs", vec![symbol("rt", 9)], vec![]);
+        let files = [a, b];
+        let index = Index {
+            files: files.into_iter().map(|f| (f.path.clone(), f)).collect(),
+            ..Default::default()
+        };
+        let r = measure(&index);
+        assert_eq!((r.truth, r.unscored), (0, 1));
+        assert!(misses(&index, 5).is_empty());
+        assert!(separate_crates("x/benches/a.rs", "x/benches/b.rs"));
+        assert!(!separate_crates("benches/a.rs", "benches/a.rs"));
+        assert!(!separate_crates("src/a.rs", "src/b.rs"));
+        assert!(!separate_crates("benches/sub/a.rs", "benches/sub/b.rs"));
+        assert!(!separate_crates("tests/a.py", "tests/b.py"), "Rust only");
+        assert!(!separate_crates("src/tests/a.rs", "src/tests/b.rs"));
     }
 }

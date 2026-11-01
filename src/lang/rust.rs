@@ -212,7 +212,7 @@ fn visit_token_calls(tokens: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
             let form = if macro_next {
                 Form::Unknown
             } else {
-                token_form(&kids, i, src)
+                token_form(&kids, i, src, ctx)
             };
             add_call(*kid, Some(name), form, facts, ctx);
         }
@@ -221,13 +221,33 @@ fn visit_token_calls(tokens: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
 
 /// The form of a call found among raw macro tokens, from the tokens just before the name:
 /// `. name` is a method (`self . name` an own method), `Foo :: name` a member of Foo.
-fn token_form(kids: &[Node], at: usize, src: &str) -> Form {
+fn token_form(kids: &[Node], at: usize, src: &str, ctx: Ctx) -> Form {
     let before = |back: usize| at.checked_sub(back).map(|i| text(kids[i], src));
     match before(1) {
         Some(".") if before(2) == Some("self") => Form::SelfRef,
-        Some(".") => Form::Method,
+        Some(".") => token_receiver(kids, at, src, ctx).map_or(Form::Method, Known::form),
         Some("::") => qualified(before(2).filter(|q| !q.is_empty())),
         _ => Form::Bare,
+    }
+}
+
+/// The type of `x` in the tokens `x . name (`, or of `field` in `self . field . name (`; any
+/// longer path (`a . b . name`) is unknown.
+fn token_receiver(kids: &[Node], at: usize, src: &str, ctx: Ctx) -> Option<Known> {
+    let recv = *kids.get(at.checked_sub(2)?)?;
+    if recv.kind() != "identifier" {
+        return None;
+    }
+    let name = text(recv, src);
+    let before = |back: usize| at.checked_sub(back).map(|i| text(kids[i], src));
+    match before(3) {
+        Some(".") if before(4) == Some("self") => ctx
+            .fields?
+            .get(&(ctx.owner?.to_string(), name.to_string()))
+            .cloned()
+            .map(Known::Class),
+        Some("." | "::") => None,
+        _ => ctx.locals?.get(name).cloned().flatten(),
     }
 }
 
@@ -1546,6 +1566,50 @@ async fn go() {
         assert_eq!(
             super::first_generic_arg("Option<Box<dyn Fn() -> Foo>>"),
             Some("Box<dyn Fn() -> Foo>")
+        );
+    }
+
+    #[test]
+    fn receivers_inside_macro_arguments_are_looked_up() {
+        let src = "struct Repo { db: Db }
+impl Repo {
+    fn run(&self) {
+        let s = Stream::new();
+        let u = other();
+        assert_eq!(s.next(), 1);
+        assert_eq!(u.skip(), 2);
+        assert_eq!(self.db.query(), 3);
+        assert_eq!(z.go(), 4);
+        assert_eq!(a.b.go(), 5);
+        assert_eq!(make().go(), 6);
+        assert_eq!(s.next().await, 7);
+        assert_eq!(x::y.go(), 8);
+        let c = |v| v;
+        assert_eq!(c.go(), 9);
+    }
+}
+fn free() {
+    assert_eq!(self.db.query(), 10);
+}
+";
+        let got: Vec<Form> = forms_of(src, &["next", "skip", "query", "go"])
+            .into_iter()
+            .map(|(_, f)| f)
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ty("Stream"),
+                hop("other", Form::Bare, false),
+                ty("Db"),
+                Form::Method,
+                Form::Method,
+                Form::Method,
+                ty("Stream"),
+                Form::Method,
+                Form::Method,
+                Form::Method,
+            ]
         );
     }
 }
