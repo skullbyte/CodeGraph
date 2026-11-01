@@ -13,8 +13,8 @@ const MAX_TERMS: usize = 4;
 /// Only this many hits of one answer are taught (each reads part of a file).
 const MAX_TAUGHT: usize = 10;
 
-/// One row per (language group, word). Groups: rust, ts (also JS), py, go, java, kt, php, cs, c (also C++).
-const TABLE: [(&str, &str, &str); 73] = [
+/// One row per (language group, word). Groups: rust, ts (also JS), py, go, java, kt, php, rb, cs, c (also C++).
+const TABLE: [(&str, &str, &str); 78] = [
     ("rust", "pub", "visible outside its module"),
     (
         "rust",
@@ -102,6 +102,15 @@ const TABLE: [(&str, &str, &str); 73] = [
     ("php", "public", "visible everywhere"),
     ("php", "static", "belongs to the class, not to an object"),
     ("php", "namespace", "a name that groups related code"),
+    ("rb", "def", "a method"),
+    ("rb", "class", "a blueprint for objects"),
+    (
+        "rb",
+        "module",
+        "a named group of methods, shared by classes",
+    ),
+    ("rb", "self", "the object the method is called on"),
+    ("rb", "nil", "no value"),
     ("c", "template", "code that works for many types"),
     ("c", "*", "a pointer: the address of a value"),
 ];
@@ -115,6 +124,7 @@ fn group_of(path: &str) -> Option<&'static str> {
         "java" => Some("java"),
         "kt" | "kts" => Some("kt"),
         "php" => Some("php"),
+        "rb" | "rake" => Some("rb"),
         "cs" => Some("cs"),
         "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" => Some("c"),
         _ => None,
@@ -291,6 +301,8 @@ fn doc_line(root: &Path, hit: &DefHit) -> Option<String> {
     let at = (hit.line as usize).checked_sub(1)?;
     let found = if group == "py" {
         docstring_below(&lines, at)?
+    } else if group == "rb" {
+        hash_comment_above(&lines, at)?
     } else {
         comment_above(&lines, at, group == "go")?
     };
@@ -319,6 +331,33 @@ fn docstring_below(lines: &[&str], at: usize) -> Option<String> {
         return None; // a body comment or code is not documentation
     }
     tour::first_doc_text(&body, true)
+}
+
+/// Ruby magic comments: settings for the interpreter or a tool, not a description.
+const RUBY_MAGIC: [&str; 6] = [
+    "frozen_string_literal:",
+    "typed:",
+    "rubocop:",
+    "encoding:",
+    "coding:",
+    ":nodoc:",
+];
+
+/// The block of `#` lines directly above a Ruby definition (an `=begin` block is not read).
+fn hash_comment_above(lines: &[&str], at: usize) -> Option<String> {
+    let before = lines.get(..at)?;
+    let mut above: Vec<&str> = before
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .take_while(|l| l.starts_with('#'))
+        .filter(|l| {
+            let text = l.trim_start_matches('#').trim().to_lowercase();
+            !RUBY_MAGIC.iter().any(|m| text.starts_with(m))
+        })
+        .collect();
+    above.reverse();
+    tour::first_doc_text(&above, true)
 }
 
 /// The doc comment directly above `at`, stepping over attributes and decorators.
@@ -418,6 +457,7 @@ mod tests {
             words("public static function run()", "A.php"),
             ["public", "static", "function"]
         );
+        assert_eq!(words("def go(self)", "a.rb"), ["def", "self"]);
         assert_eq!(
             words("static int f(const char *s)", "a.c"),
             ["static", "const", "*"]
@@ -459,6 +499,30 @@ mod tests {
             signature: "def go(self)".into(),
         };
         assert_eq!(teach(dir.path(), &py)[1], "  doc: Runs it.");
+    }
+
+    #[test]
+    fn ruby_doc_comment_is_the_hash_block_right_above() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rb"),
+            "# Far away.\n\n# frozen_string_literal: true\n# Adds one.\n# More text.\ndef add(x)\n  x + 1\nend\n\ndef bare\nend\n",
+        )
+        .unwrap();
+        let hit = |line, signature: &str| DefHit {
+            path: "a.rb".into(),
+            line,
+            signature: signature.into(),
+        };
+        assert_eq!(
+            teach(dir.path(), &hit(6, "def add(x)"))[1],
+            "  doc: Adds one."
+        );
+        // A blank line cuts the block: the comment further up is not this method's.
+        assert_eq!(
+            teach(dir.path(), &hit(10, "def bare")),
+            ["  terms: def = a method"]
+        );
     }
 
     #[test]
