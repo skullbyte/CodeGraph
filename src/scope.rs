@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::lang::Lang;
 use crate::model::{Call, Form, Hop, Index, Ret};
 use crate::query;
+use crate::usepath::UsePaths;
 
 /// A project definition: file, 1-based line (as SCIP names it) and the type or trait it is in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,6 +39,8 @@ pub struct Resolver {
     imports: HashMap<String, BTreeSet<String>>,
     /// Every project definition by name: what a step of a call chain can be.
     by_name: HashMap<String, Vec<Def>>,
+    /// Rust `use` paths and re-exports.
+    paths: UsePaths,
 }
 
 /// Longest call chain followed; a longer one is read as a plain method call.
@@ -75,6 +78,7 @@ impl Resolver {
         Resolver {
             imports: imports.into_iter().collect(),
             by_name,
+            paths: UsePaths::new(index),
         }
     }
 
@@ -97,7 +101,7 @@ impl Resolver {
             // The wider fallback of `resolve_form` may not decide a type: keep real matches only.
             Form::SelfRef => owner.map_or_else(Vec::new, |o| members_of(defs, o)),
             Form::Bare | Form::Module(_) => self
-                .resolve_form(from, &hop.form, owner, defs, depth + 1)
+                .resolve_form(from, &hop.callee, &hop.form, owner, defs, depth + 1)
                 .into_iter()
                 .filter(|&i| defs[i].container.is_none())
                 .collect(),
@@ -132,12 +136,20 @@ impl Resolver {
     /// override of it are different containers and are not linked to each other (known gap). Each rule falls back to the wider set
     /// when it would leave nothing, so a rule can only narrow, never invent.
     pub fn resolve(&self, from: &str, call: &Call, defs: &[Def]) -> Vec<usize> {
-        self.resolve_form(from, &call.form, call.owner.as_deref(), defs, 0)
+        self.resolve_form(
+            from,
+            &call.callee,
+            &call.form,
+            call.owner.as_deref(),
+            defs,
+            0,
+        )
     }
 
     fn resolve_form(
         &self,
         from: &str,
+        name: &str,
         form: &Form,
         owner: Option<&str>,
         defs: &[Def],
@@ -150,13 +162,28 @@ impl Resolver {
             Form::Returned(hop) => match self.hop_type(from, hop, owner, depth) {
                 Some(t) => match of_type(&t) {
                     members if !members.is_empty() => members,
-                    _ => self.resolve_form(from, &Form::Method, owner, defs, depth),
+                    _ => self.resolve_form(from, name, &Form::Method, owner, defs, depth),
                 },
-                None => self.resolve_form(from, &Form::Method, owner, defs, depth),
+                None => self.resolve_form(from, name, &Form::Method, owner, defs, depth),
             },
             Form::Unknown => all(),
             Form::SelfRef => owner.map_or_else(all, |o| narrowed(of_type(o))),
-            Form::Type(t) => narrowed(of_type(t)),
+            Form::Type(t) => {
+                let members = of_type(t);
+                // Drop members of other packages that define their own type of this name; keep
+                // the rest, since a trait impl elsewhere can add members to the imported type.
+                let rivals = self.paths.rival_packages(from, t);
+                let inside: Vec<usize> = members
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        self.paths
+                            .package_folder_of(&defs[i].path)
+                            .is_none_or(|p| !rivals.iter().any(|r| r == p))
+                    })
+                    .collect();
+                narrowed(if inside.is_empty() { members } else { inside })
+            }
             Form::Method => narrowed(
                 (0..defs.len())
                     .filter(|&i| defs[i].container.is_some())
@@ -172,6 +199,18 @@ impl Resolver {
                 }
                 if set.is_empty() {
                     return all();
+                }
+                let files = match form {
+                    Form::Module(m) => self.paths.module(from, m, name),
+                    _ => self.paths.bare(from, name),
+                };
+                let used: Vec<usize> = set
+                    .iter()
+                    .copied()
+                    .filter(|&i| files.contains(&defs[i].path))
+                    .collect();
+                if !used.is_empty() {
+                    return used;
                 }
                 // `time::advance()` lives in `time.rs` or somewhere under `time/`.
                 if let Form::Module(m) = form {
@@ -389,6 +428,148 @@ mod tests {
         let d = defs(&[("b.ts", 1), ("b.ts", 1)]);
         assert_eq!(r.narrow("a.ts", &d), vec![0, 1]);
         assert!(r.narrow("a.ts", &[]).is_empty());
+    }
+
+    #[test]
+    fn use_paths_pick_the_defining_file_and_fall_back_when_unknown() {
+        use crate::model::{Kind, Symbol, Use};
+        let sym = |n: &str, k: Kind, c: Option<&str>| Symbol {
+            name: n.into(),
+            kind: k,
+            line: 1,
+            signature: String::new(),
+            container: c.map(String::from),
+            returns: None,
+        };
+        let entry = |path: &str, uses: &[(&str, &str)], symbols: Vec<Symbol>| FileEntry {
+            path: path.into(),
+            uses: uses
+                .iter()
+                .map(|(a, p)| Use {
+                    alias: a.to_string(),
+                    path: p.to_string(),
+                    public: true,
+                    local: false,
+                })
+                .collect(),
+            symbols,
+            ..Default::default()
+        };
+        let r = Resolver::new(&index(vec![
+            entry("tok/src/lib.rs", &[("f", "m::f")], vec![]),
+            entry("tok/src/m.rs", &[], vec![sym("f", Kind::Fn, None)]),
+            entry("tok/src/b.rs", &[("Bld", "crate::m::Bld")], vec![]),
+            entry(
+                "app/src/main.rs",
+                &[("f", "tok::f"), ("Bld", "tok::m::Bld")],
+                vec![],
+            ),
+        ]));
+        let d = defs(&[("other/src/lib.rs", 1), ("tok/src/m.rs", 1)]);
+        let bare = |from: &str| r.resolve(from, &call(Form::Bare, None), &d);
+        assert_eq!(bare("app/src/main.rs"), vec![1], "use tok::f; f()");
+        assert_eq!(bare("nowhere.rs"), vec![0, 1], "no use: the old rules");
+        let module =
+            |m: &str| r.resolve("app/src/main.rs", &call(Form::Module(m.into()), None), &d);
+        assert_eq!(module("tok"), vec![1], "tok::f()");
+        assert_eq!(module("zzz"), vec![0, 1], "unknown module: the old rules");
+    }
+
+    #[test]
+    fn a_type_call_drops_rival_types_but_keeps_trait_impls_elsewhere() {
+        use crate::model::{Kind, Symbol, Use};
+        let strukt = Symbol {
+            name: "Bld".into(),
+            kind: Kind::Struct,
+            line: 1,
+            signature: String::new(),
+            container: None,
+            returns: None,
+        };
+        let r = Resolver::new(&index(vec![
+            FileEntry {
+                path: "tok/src/bld.rs".into(),
+                symbols: vec![strukt],
+                ..Default::default()
+            },
+            FileEntry {
+                path: "tok/src/lib.rs".into(),
+                ..Default::default()
+            },
+            // another package with its own `Bld`
+            FileEntry {
+                path: "rival/src/lib.rs".into(),
+                symbols: vec![Symbol {
+                    name: "Bld".into(),
+                    kind: Kind::Struct,
+                    line: 1,
+                    signature: String::new(),
+                    container: None,
+                    returns: None,
+                }],
+                ..Default::default()
+            },
+            FileEntry {
+                path: "app/src/main.rs".into(),
+                uses: vec![Use {
+                    alias: "Bld".into(),
+                    path: "tok::bld::Bld".into(),
+                    public: false,
+                    local: false,
+                }],
+                ..Default::default()
+            },
+        ]));
+        let d = vec![
+            in_type("rival/src/x.rs", 1, "Bld"),
+            in_type("tok/src/bld.rs", 2, "Bld"),
+            in_type("app/src/main.rs", 3, "Bld"), // `impl Trait for tok::Bld` downstream
+        ];
+        let c = call(Form::Type("Bld".into()), None);
+        assert_eq!(r.resolve("app/src/main.rs", &c, &d), vec![1, 2]);
+        assert_eq!(r.resolve("elsewhere.rs", &c, &d), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn nested_packages_do_not_rival_each_other_by_folder_prefix() {
+        use crate::model::{Kind, Symbol, Use};
+        let strukt = |path: &str| FileEntry {
+            path: path.into(),
+            symbols: vec![Symbol {
+                name: "Bld".into(),
+                kind: Kind::Struct,
+                line: 1,
+                signature: String::new(),
+                container: None,
+                returns: None,
+            }],
+            ..Default::default()
+        };
+        let r = Resolver::new(&index(vec![
+            strukt("tok/src/lib.rs"),
+            strukt("tok/sub/src/lib.rs"),
+            FileEntry {
+                path: "app/src/main.rs".into(),
+                uses: vec![Use {
+                    alias: "Bld".into(),
+                    path: "tok::sub::Bld".into(),
+                    public: false,
+                    local: false,
+                }],
+                ..Default::default()
+            },
+        ]));
+        let d = vec![
+            in_type("tok/src/lib.rs", 1, "Bld"),
+            in_type("tok/sub/src/lib.rs", 2, "Bld"),
+            in_type("app/src/main.rs", 3, "Bld"),
+        ];
+        let c = call(Form::Type("Bld".into()), None);
+        let got = r.resolve("app/src/main.rs", &c, &d);
+        assert!(
+            got.contains(&1),
+            "the imported package's member stays: {got:?}"
+        );
     }
 
     #[test]

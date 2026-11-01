@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Parser};
 
 use super::{Facts, caller_name, field_text, line_of, signature, text};
-use crate::model::{Call, Form, Hop, Kind, Ret, Symbol};
+use crate::model::{Call, Form, Hop, Kind, Ret, Symbol, Use};
 
 /// Where a walk is: the innermost `fn` (the caller of what it finds), the type or trait whose
 /// method that `fn` is (the `owner` of its calls) and the type or trait that items declared here
@@ -99,6 +99,14 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
             _ = add_item(node, Kind::Const, src, facts, ctx.container);
         }
         "use_declaration" => {
+            if let Some(arg) = node.child_by_field_name("argument") {
+                let from = facts.uses.len();
+                expand_use(arg, "", is_pub(node), src, &mut facts.uses);
+                // Inside `mod tests` or a fn the names are only in scope there.
+                if !node.parent().is_some_and(|p| p.kind() == "source_file") {
+                    facts.uses[from..].iter_mut().for_each(|u| u.local = true);
+                }
+            }
             facts.imports.extend(
                 node.child_by_field_name("argument")
                     .and_then(|a| use_root(text(a, src))),
@@ -802,6 +810,66 @@ fn is_pub(node: Node) -> bool {
         .any(|c| c.kind() == "visibility_modifier")
 }
 
+/// Flatten a `use` tree into one `Use` per name: `a::{b, c as d}` gives `b = a::b`, `d = a::c`.
+/// Globs add nothing; `self` in a list names the list's own path.
+fn expand_use(node: Node, prefix: &str, public: bool, src: &str, out: &mut Vec<Use>) {
+    let join = |tail: &str| match prefix {
+        "" => tail.to_string(),
+        p => format!("{p}::{tail}"),
+    };
+    let path_of = |n: Node| text(n, src).split_whitespace().collect::<String>();
+    match node.kind() {
+        "identifier" | "scoped_identifier" | "crate" | "self" | "super" => {
+            let path = join(&path_of(node));
+            let mut segments = path.rsplit("::");
+            let last = segments.next().unwrap_or("");
+            let alias = if last == "self" {
+                segments.next().unwrap_or("")
+            } else {
+                last
+            };
+            let path = path.strip_suffix("::self").unwrap_or(&path).to_string();
+            if !alias.is_empty() {
+                out.push(Use {
+                    alias: alias.to_string(),
+                    path,
+                    public,
+                    local: false,
+                });
+            }
+        }
+        "use_as_clause" => {
+            if let (Some(p), Some(a)) = (
+                node.child_by_field_name("path"),
+                node.child_by_field_name("alias"),
+            ) {
+                let path = join(&path_of(p));
+                out.push(Use {
+                    alias: text(a, src).to_string(),
+                    path: path.strip_suffix("::self").unwrap_or(&path).to_string(),
+                    public,
+                    local: false,
+                });
+            }
+        }
+        "scoped_use_list" => {
+            let base = node
+                .child_by_field_name("path")
+                .map_or(prefix.to_string(), |p| join(&path_of(p)));
+            if let Some(list) = node.child_by_field_name("list") {
+                expand_use(list, &base, public, src, out);
+            }
+        }
+        "use_list" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                expand_use(child, prefix, public, src, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Local-crate name behind a `use` path: `crate::util::x` -> util, `serde::X` -> serde, `std::..` -> none.
 fn use_root(path: &str) -> Option<String> {
     let mut parts = path.trim_start_matches("::").split("::");
@@ -848,6 +916,39 @@ fn outer() {
     Greeter::new();
 }
 ";
+
+    #[test]
+    fn use_trees_expand_to_alias_and_full_path() {
+        let src = "use a::b;\npub use self::c::{D, e as f, g::{self, H}, k::{self as kk}};\nuse crate::x::*;\nuse super::sup;\n";
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        let got: Vec<_> = facts
+            .uses
+            .iter()
+            .map(|u| (u.alias.as_str(), u.path.as_str(), u.public))
+            .collect();
+        let want = vec![
+            ("b", "a::b", false),
+            ("D", "self::c::D", true),
+            ("f", "self::c::e", true),
+            ("g", "self::c::g", true),
+            ("H", "self::c::g::H", true),
+            ("kk", "self::c::k", true),
+            ("sup", "super::sup", false),
+        ];
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn uses_inside_a_mod_or_fn_are_marked_local() {
+        let src = "use a::top;\nmod t { use b::inner; }\nfn f() { use c::local; }\n";
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        let got: Vec<_> = facts
+            .uses
+            .iter()
+            .map(|u| (u.alias.as_str(), u.local))
+            .collect();
+        assert_eq!(got, vec![("top", false), ("inner", true), ("local", true)]);
+    }
 
     #[test]
     fn symbols() {

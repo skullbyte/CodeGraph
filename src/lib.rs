@@ -21,5 +21,6 @@ pub mod scope;
 pub mod semantic;
 pub mod serve;
 pub mod tour;
+pub mod usepath;
 pub mod walk;
 pub mod watch;

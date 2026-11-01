@@ -105,6 +105,20 @@ pub struct Hop {
     pub part: Option<u32>,
 }
 
+/// One name brought in by a Rust `use`: `use a::{b, c as d};` gives `b = a::b` and `d = a::c`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Use {
+    pub alias: String,
+    /// The full path, segments joined by `::` (`crate`, `self` and `super` kept as written).
+    pub path: String,
+    /// `pub use`: the name is re-exported from this module.
+    pub public: bool,
+    /// Declared inside a `mod` or function, not at the top of the file: it shadows or adds names
+    /// only there, so it is kept to cancel narrowing and never followed.
+    #[serde(default)]
+    pub local: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileEntry {
     pub path: String,
@@ -113,6 +127,9 @@ pub struct FileEntry {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<String>,
     pub calls: Vec<Call>,
+    /// Every name a `use` brings in (Rust only), to follow paths and re-exports.
+    #[serde(default)]
+    pub uses: Vec<Use>,
     /// What a compiler-grade index (SCIP) says some of `calls` refer to; sorted by call position.
     /// Empty until `codegraph scip` runs; a re-parsed file starts empty again.
     #[serde(default)]

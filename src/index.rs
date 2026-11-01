@@ -13,7 +13,7 @@ use crate::model::{FileEntry, Index};
 use crate::{query, walk};
 
 /// Bump when the graph.json layout or extraction rules change; old caches are then ignored.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 /// How many files were parsed afresh versus taken from the cache.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -314,6 +314,7 @@ fn entry_from(rel: &str, src: &str, hash: String) -> Result<FileEntry> {
         symbols: facts.symbols,
         imports: facts.imports,
         calls: facts.calls,
+        uses: facts.uses,
         resolved: Vec::new(),
     })
 }

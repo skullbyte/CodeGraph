@@ -25,6 +25,7 @@ pub struct Facts {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<String>,
     pub calls: Vec<Call>,
+    pub uses: Vec<crate::model::Use>,
 }
 
 /// Supported languages; adding one means a new variant, a grammar and a module.
