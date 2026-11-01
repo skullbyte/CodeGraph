@@ -202,10 +202,14 @@ impl Server {
             .ok_or_else(|| "index unavailable".to_string())
     }
 
+    /// When the graph last changed: its snapshot or the log of updates after it, whichever is newer.
     fn stamp(&self) -> Option<SystemTime> {
-        fs::metadata(self.root.join(".claude").join("graph.bin"))
-            .and_then(|m| m.modified())
-            .ok()
+        let modified = |name: &str| {
+            fs::metadata(self.root.join(".claude").join(name))
+                .and_then(|m| m.modified())
+                .ok()
+        };
+        modified("graph.bin").max(modified("delta.bin"))
     }
 
     fn build(&self) -> Result<Index, String> {
@@ -215,8 +219,8 @@ impl Server {
         if let Some(index) = index::load(&self.root) {
             return Ok(index);
         }
-        let (index, _) = index::build(&self.root, None).map_err(fail)?;
-        index::save(&self.root, &index).map_err(fail)?;
+        let (mut index, _) = index::build(&self.root, None).map_err(fail)?;
+        index::save(&self.root, &mut index).map_err(fail)?;
         Ok(index)
     }
 }
@@ -520,8 +524,8 @@ mod tests {
             "pub fn alpha() {}\npub fn beta() {\n    alpha();\n}\n",
         )
         .unwrap();
-        let (idx, _) = index::build(dir.path(), None).unwrap();
-        index::save(dir.path(), &idx).unwrap();
+        let (mut idx, _) = index::build(dir.path(), None).unwrap();
+        index::save(dir.path(), &mut idx).unwrap();
         dir
     }
 
@@ -786,7 +790,7 @@ mod tests {
         .unwrap();
         let (mut idx, _) = index::build(dir.path(), None).unwrap();
         index::update_file(dir.path(), &mut idx, "lib.rs").unwrap();
-        index::save(dir.path(), &idx).unwrap();
+        index::save(dir.path(), &mut idx).unwrap();
         assert!(
             call(&mut server, "def", json!({ "name": "two" }))
                 .0
@@ -827,8 +831,8 @@ mod tests {
         let hubs_before = call(&mut server, "hubs", json!({})).0;
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(dir.path().join("two.rs"), "pub fn two() { one(); }\n").unwrap();
-        let (idx, _) = index::build(dir.path(), None).unwrap();
-        index::save(dir.path(), &idx).unwrap();
+        let (mut idx, _) = index::build(dir.path(), None).unwrap();
+        index::save(dir.path(), &mut idx).unwrap();
         // The cached cluster count and hub list must not survive the reload.
         assert!(
             call(&mut server, "stats", json!({}))

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::Index;
+use crate::model::{FileEntry, Index};
 use crate::query;
 
 /// Folders shown in the "by folder" summary line.
@@ -19,27 +19,66 @@ pub fn render(project: &str, index: &Index) -> String {
     // Plain pushes, not `write!`: tokio has ~20k lines and formatting each one cost half of `update`.
     out.reserve(index.files.values().map(approx_len).sum());
     for entry in index.files.values() {
-        out.push_str("\n## ");
-        out.push_str(&entry.path);
-        out.push_str(" (");
-        push_number(&mut out, entry.lines);
-        out.push_str(" lines)\n");
-        let imports = query::local_imports(index, entry);
-        if !imports.is_empty() {
-            out.push_str("uses: ");
-            out.push_str(&imports.join(", "));
-            out.push('\n');
-        }
-        for s in &entry.symbols {
-            out.push_str(&entry.path);
-            out.push(':');
-            push_number(&mut out, s.line);
-            out.push(' ');
-            out.push_str(&s.signature);
-            out.push('\n');
-        }
+        push_section(&mut out, index, entry);
     }
     out
+}
+
+/// The text of one file: `\n## path (N lines)`, its `uses:` line, then one line per symbol.
+fn push_section(out: &mut String, index: &Index, entry: &FileEntry) {
+    out.push_str("\n## ");
+    out.push_str(&entry.path);
+    out.push_str(" (");
+    push_number(out, entry.lines);
+    out.push_str(" lines)\n");
+    let imports = query::local_imports(index, entry);
+    if !imports.is_empty() {
+        out.push_str("uses: ");
+        out.push_str(&imports.join(", "));
+        out.push('\n');
+    }
+    for s in &entry.symbols {
+        out.push_str(&entry.path);
+        out.push(':');
+        push_number(out, s.line);
+        out.push(' ');
+        out.push_str(&s.signature);
+        out.push('\n');
+    }
+}
+
+/// The paths a codemap has sections for, in order.
+pub fn section_paths(text: &str) -> Vec<&str> {
+    text.match_indices("\n## ")
+        .filter_map(|(at, _)| header_path(text, at))
+        .collect()
+}
+
+/// `text` with the section of `entry` replaced by a fresh one, everything else untouched. `index`
+/// only has to know the project's file paths and aliases (for the `uses:` line). `None` when the
+/// codemap has no such section (a new file: that needs a full render).
+pub fn splice(text: &str, index: &Index, entry: &FileEntry) -> Option<String> {
+    let (start, end) = find_section(text, &entry.path)?;
+    let mut fresh = String::new();
+    push_section(&mut fresh, index, entry);
+    Some([&text[..start], &fresh, &text[end..]].concat())
+}
+
+/// Byte range of the section of `path`: from its leading newline to the next section (or the end).
+/// The whole header line is compared, so `a` never matches the section of `a (b).rs`.
+fn find_section(text: &str, path: &str) -> Option<(usize, usize)> {
+    let mut starts = text.match_indices("\n## ").map(|(at, _)| at);
+    let start = starts.find(|&at| header_path(text, at) == Some(path))?;
+    let end = starts.next().unwrap_or(text.len());
+    Some((start, end))
+}
+
+/// The path in the header line that starts at `at` (`\n## path (N lines)`).
+fn header_path(text: &str, at: usize) -> Option<&str> {
+    let line = text[at + 4..].lines().next()?;
+    line.strip_suffix(" lines)")?
+        .rsplit_once(" (")
+        .map(|(path, _)| path)
 }
 
 /// A close guess of the text one file adds, to size the buffer once.
@@ -91,6 +130,71 @@ fn folder_summary(index: &Index) -> String {
 mod tests {
     use super::*;
     use crate::model::{FileEntry, Kind, Symbol};
+
+    fn entry(path: &str, lines: u32, signatures: &[&str]) -> FileEntry {
+        use crate::model::{Kind, Symbol};
+        FileEntry {
+            path: path.into(),
+            lines,
+            symbols: signatures
+                .iter()
+                .enumerate()
+                .map(|(i, sig)| Symbol {
+                    name: format!("f{i}"),
+                    kind: Kind::Fn,
+                    line: i as u32 + 1,
+                    signature: (*sig).into(),
+                    container: None,
+                    returns: None,
+                })
+                .collect(),
+            ..FileEntry::default()
+        }
+    }
+
+    #[test]
+    fn splicing_an_edited_file_equals_a_full_render() {
+        let mut index = Index::default();
+        for e in [
+            entry("a.rs", 3, &["fn a()"]),
+            entry("b.rs", 5, &["fn b()", "fn c()"]),
+            entry("c.rs", 1, &[]),
+        ] {
+            index.files.insert(e.path.clone(), e);
+        }
+        let before = render("p", &index);
+        assert_eq!(section_paths(&before), vec!["a.rs", "b.rs", "c.rs"]);
+        for edited in ["a.rs", "b.rs", "c.rs"] {
+            let mut after = index.clone();
+            let new = entry(edited, 9, &["fn renamed()", "fn more()"]);
+            after.files.insert(edited.into(), new.clone());
+            assert_eq!(
+                splice(&before, &after, &new).unwrap(),
+                render("p", &after),
+                "editing {edited}"
+            );
+        }
+        assert_eq!(splice(&before, &index, &entry("new.rs", 1, &[])), None);
+    }
+
+    #[test]
+    fn a_path_that_is_a_prefix_of_another_never_matches_its_section() {
+        let mut index = Index::default();
+        for e in [
+            entry("a", 1, &["fn x()"]),
+            entry("a (b).rs", 2, &["fn y()"]),
+        ] {
+            index.files.insert(e.path.clone(), e);
+        }
+        let before = render("p", &index);
+        assert_eq!(section_paths(&before), vec!["a", "a (b).rs"]);
+        for edited in ["a", "a (b).rs"] {
+            let mut after = index.clone();
+            let new = entry(edited, 7, &["fn z()"]);
+            after.files.insert(edited.into(), new.clone());
+            assert_eq!(splice(&before, &after, &new).unwrap(), render("p", &after));
+        }
+    }
 
     #[test]
     fn numbers_are_written_like_display_does() {

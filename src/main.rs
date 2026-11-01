@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-use codegraph::model::Index;
+use codegraph::model::{FileEntry, Index};
 use codegraph::query::{Affected, CallerHit, DefHit, Hop, Hub};
 use codegraph::{
     benchmark, codemap, community, glossary, hook, html, index, install, mermaid, obsidian, query,
@@ -409,7 +409,7 @@ fn reindex(root: &Path) -> Result<(usize, index::Stats)> {
             Err(e) => eprintln!("warning: saved SCIP data not applied: {e:#}"),
         }
     }
-    write_outputs(root, &idx)?;
+    write_outputs(root, &mut idx)?;
     Ok((idx.files.len(), stats))
 }
 
@@ -426,6 +426,9 @@ fn cmd_update(root: &Path, file: &Path) -> Result<()> {
 /// a message in the returned list.
 fn update_paths(root: &Path, rels: &[String]) -> Result<Vec<String>> {
     let _lock = index::lock(root)?;
+    if let Some(failed) = update_edits(root, rels)? {
+        return Ok(failed);
+    }
     let Some(mut idx) = index::load(root) else {
         reindex(root)?;
         return Ok(Vec::new());
@@ -436,8 +439,73 @@ fn update_paths(root: &Path, rels: &[String]) -> Result<Vec<String>> {
             failed.push(format!("{rel}: {e:#}"));
         }
     }
-    write_outputs(root, &idx)?;
+    write_outputs(root, &mut idx)?;
     Ok(failed)
+}
+
+/// The cheap update, for edits of files already in the graph: record the new entries in the delta
+/// log and patch their sections of codemap.md. The graph is not loaded and graph.json is left for
+/// the next full save. `None` means this is not that case (a file added or removed changes other
+/// files' `uses:` lines, aliases changed, no usable graph, the log is long): take the full path.
+fn update_edits(root: &Path, rels: &[String]) -> Result<Option<Vec<String>>> {
+    if index::delta_len(root) > index::MAX_DELTA_BYTES {
+        return Ok(None); // the full path folds the log into the graph
+    }
+    let Some((epoch, aliases)) = index::fast_base(root) else {
+        return Ok(None);
+    };
+    if aliases != index::import_aliases(root) {
+        return Ok(None);
+    }
+    let map = root.join(".claude").join("codemap.md");
+    let Ok(mut text) = fs::read_to_string(&map) else {
+        return Ok(None);
+    };
+    // Only the file paths and aliases matter to a section's `uses:` line.
+    let light = Index {
+        aliases,
+        files: codemap::section_paths(&text)
+            .into_iter()
+            .map(|p| (p.to_string(), FileEntry::default()))
+            .collect(),
+        ..Index::default()
+    };
+    let is_edit = |rel: &String| {
+        light.files.contains_key(rel.as_str())
+            && codegraph::walk::is_indexable(root, rel)
+            && root.join(rel).is_file()
+    };
+    if !rels.iter().all(is_edit) {
+        return Ok(None);
+    }
+    let (mut failed, mut deltas) = (Vec::new(), Vec::new());
+    for rel in rels {
+        let entry = match index::entry_for(root, rel) {
+            Ok(entry) => entry,
+            Err(e) => {
+                failed.push(format!("{rel}: {e:#}"));
+                continue;
+            }
+        };
+        let Some(patched) = codemap::splice(&text, &light, &entry) else {
+            return Ok(None);
+        };
+        text = patched;
+        deltas.push(index::Delta {
+            path: rel.clone(),
+            entry: Some(entry),
+            aliases: light.aliases.clone(),
+        });
+    }
+    if !deltas.is_empty() {
+        // Either write failing leaves graph and codemap disagreeing: the full path rewrites both.
+        let wrote = index::append_deltas(root, epoch, &deltas)
+            .and_then(|()| index::write_atomic(&map, text.as_bytes()));
+        if wrote.is_err() {
+            return Ok(None);
+        }
+    }
+    Ok(Some(failed))
 }
 
 /// Print a line; false means stdout is closed (the reader went away), so the caller should stop.
@@ -535,7 +603,7 @@ fn cwd_has_folder_of(file: &Path) -> bool {
         .is_some_and(Path::exists)
 }
 
-fn write_outputs(root: &Path, idx: &Index) -> Result<()> {
+fn write_outputs(root: &Path, idx: &mut Index) -> Result<()> {
     index::save(root, idx)?;
     let map = root.join(".claude").join("codemap.md");
     index::write_atomic(&map, codemap::render(&project_name(root)?, idx).as_bytes())
@@ -696,7 +764,7 @@ fn cmd_scip(root: &Path, file: Option<&Path>, run: bool, json: bool) -> Result<(
         let docs = scip::parse(&data).with_context(|| format!("parsing {}", path.display()))?;
         scip::apply(&mut idx, &docs)
     };
-    index::save(root, &idx)?;
+    index::save(root, &mut idx)?;
     if json {
         println!("{}", serde_json::to_string(&stats)?);
         return Ok(());

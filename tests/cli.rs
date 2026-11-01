@@ -210,6 +210,105 @@ fn scip_run_works_with_a_relative_dir() {
 }
 
 #[test]
+fn updating_an_edited_file_is_cheap_and_matches_a_full_index() {
+    let dir = project();
+    let root = dir.path();
+    run(root, &["index"]);
+    let delta = root.join(".claude/delta.bin");
+    let graph_json = fs::read_to_string(root.join(".claude/graph.json")).unwrap();
+    assert!(!delta.exists());
+
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn gamma() {}\npub fn beta() { gamma(); }\n",
+    )
+    .unwrap();
+    let out = run(root, &["update", root.join("src/lib.rs").to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        delta.is_file(),
+        "an edit is logged, not folded into the graph"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".claude/graph.json")).unwrap(),
+        graph_json,
+        "graph.json waits for the next full save"
+    );
+    assert_eq!(
+        stdout(&run(root, &["def", "gamma"])),
+        "src/lib.rs:1 pub fn gamma()\n"
+    );
+    assert!(stdout(&run(root, &["def", "alpha"])).is_empty());
+    assert_eq!(
+        stdout(&run(root, &["callers", "gamma"])),
+        "src/lib.rs:2  in pub fn beta\n"
+    );
+
+    // A full render of the same graph gives the codemap the splice made, byte for byte.
+    let spliced = fs::read_to_string(root.join(".claude/codemap.md")).unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn gamma() {}\npub fn beta() { gamma(); }\n",
+    )
+    .unwrap();
+    run(root, &["index"]);
+    assert_eq!(
+        fs::read_to_string(root.join(".claude/codemap.md")).unwrap(),
+        spliced
+    );
+    assert!(!delta.exists(), "a full index folds the log in");
+    assert!(
+        fs::read_to_string(root.join(".claude/graph.json"))
+            .unwrap()
+            .contains("gamma")
+    );
+}
+
+#[test]
+fn updating_a_new_or_deleted_file_takes_the_full_path() {
+    let dir = project();
+    let root = dir.path();
+    run(root, &["index"]);
+    let delta = root.join(".claude/delta.bin");
+    fs::write(root.join("src/more.rs"), "pub fn more() {}\n").unwrap();
+    assert!(
+        run(
+            root,
+            &["update", root.join("src/more.rs").to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    assert!(!delta.exists());
+    assert_eq!(
+        stdout(&run(root, &["def", "more"])),
+        "src/more.rs:1 pub fn more()\n"
+    );
+    fs::remove_file(root.join("src/more.rs")).unwrap();
+    assert!(
+        run(
+            root,
+            &["update", root.join("src/more.rs").to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    assert!(stdout(&run(root, &["def", "more"])).is_empty());
+    // An edit after that is cheap again, on the fresh graph.
+    fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    assert!(
+        run(root, &["update", root.join("src/lib.rs").to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(delta.is_file());
+}
+
+#[test]
 fn json_flag_prints_json() {
     let dir = project();
     run(dir.path(), &["index"]);

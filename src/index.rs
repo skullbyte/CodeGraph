@@ -13,7 +13,7 @@ use crate::model::{FileEntry, Index};
 use crate::{query, walk};
 
 /// Bump when the graph.json layout or extraction rules change; old caches are then ignored.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// How many files were parsed afresh versus taken from the cache.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -45,8 +45,125 @@ pub fn cache_exists(root: &Path) -> bool {
 /// different binary (so a changed extractor never reuses stale results).
 pub fn load(root: &Path) -> Option<Index> {
     let data = fs::read(cache_path(root)).ok()?;
-    let index: Index = postcard::from_bytes(&data).ok()?;
-    (index.version == VERSION && index.extractor == fingerprint()).then_some(index)
+    let mut index: Index = postcard::from_bytes(&data).ok()?;
+    if index.version != VERSION || index.extractor != fingerprint() {
+        return None;
+    }
+    for delta in read_deltas(root, index.epoch) {
+        index.aliases = delta.aliases;
+        match delta.entry {
+            Some(entry) => index.files.insert(delta.path, entry),
+            None => index.files.remove(&delta.path),
+        };
+    }
+    Some(index)
+}
+
+/// The first fields of graph.bin, read without decoding the graph (same order as `Index`).
+#[derive(serde::Deserialize)]
+struct Header {
+    version: u32,
+    extractor: String,
+    epoch: u64,
+    aliases: BTreeMap<String, String>,
+}
+
+/// What an update needs to know about the graph on disk without loading it: its epoch and the
+/// import aliases it ended with (the last delta's, else its own). `None` when the graph is missing
+/// or not usable by this binary (other version or extractor).
+pub fn fast_base(root: &Path) -> Option<(u64, BTreeMap<String, String>)> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    fs::File::open(cache_path(root))
+        .ok()?
+        .take(1 << 16) // the aliases sit right after the epoch; a bigger map is not worth it
+        .read_to_end(&mut buf)
+        .ok()?;
+    let (header, _) = postcard::take_from_bytes::<Header>(&buf).ok()?;
+    if header.version != VERSION || header.extractor != fingerprint() {
+        return None;
+    }
+    let aliases = read_deltas(root, header.epoch)
+        .pop()
+        .map_or(header.aliases, |d| d.aliases);
+    Some((header.epoch, aliases))
+}
+
+/// One change recorded after the last full save: a file's new entry, or `None` once it is gone.
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Delta {
+    pub path: String,
+    pub entry: Option<FileEntry>,
+    pub aliases: BTreeMap<String, String>,
+}
+
+/// Past this size the log is folded into the graph by the next full path (it is read on every load).
+pub const MAX_DELTA_BYTES: u64 = 1 << 20;
+
+fn delta_path(root: &Path) -> PathBuf {
+    root.join(".claude").join("delta.bin")
+}
+
+/// Size of the delta log, 0 if there is none (used to notice changes and to decide on compaction).
+pub fn delta_len(root: &Path) -> u64 {
+    fs::metadata(delta_path(root)).map_or(0, |m| m.len())
+}
+
+/// Append changes to the log of the graph with `epoch` (the caller holds the project lock). A log
+/// of another epoch is replaced; a torn tail (an append that died half way) is cut off first, or
+/// everything after it would be unreadable. Layout: 8 bytes epoch, then `u32 length + postcard`.
+pub fn append_deltas(root: &Path, epoch: u64, deltas: &[Delta]) -> Result<()> {
+    use std::io::Write;
+    let path = delta_path(root);
+    let existing = fs::read(&path).unwrap_or_default();
+    let (_, valid) = parse_log(&existing, epoch);
+    let mut bytes = Vec::new();
+    if valid == 0 {
+        bytes.extend(epoch.to_le_bytes());
+    }
+    for delta in deltas {
+        let record = postcard::to_stdvec(delta)?;
+        bytes.extend(u32::try_from(record.len())?.to_le_bytes());
+        bytes.extend(record);
+    }
+    let mut file = fs::OpenOptions::new();
+    file.create(true);
+    if valid == existing.len() && valid > 0 {
+        file.append(true);
+    } else {
+        // Replacing a log of another epoch, or cutting a torn tail: keep the good records.
+        file.write(true).truncate(true);
+        bytes.splice(0..0, existing[..valid].iter().copied());
+    }
+    file.open(&path)
+        .and_then(|mut f| f.write_all(&bytes))
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// The records of a log of `epoch` and how many bytes of `data` they cover (the header
+/// included); 0 when the log is empty or belongs to another epoch.
+fn parse_log(data: &[u8], epoch: u64) -> (Vec<Delta>, usize) {
+    if data.get(..8) != Some(&epoch.to_le_bytes()[..]) {
+        return (Vec::new(), 0);
+    }
+    let mut deltas = Vec::new();
+    let mut rest = &data[8..];
+    while let Some((len, tail)) = rest.split_first_chunk::<4>() {
+        let len = u32::from_le_bytes(*len) as usize;
+        let Some(record) = tail.get(..len) else { break };
+        let Ok(delta) = postcard::from_bytes(record) else {
+            break;
+        };
+        deltas.push(delta);
+        rest = &tail[len..];
+    }
+    (deltas, data.len() - rest.len())
+}
+
+/// The recorded changes of the graph with `epoch`; a torn last record is ignored.
+fn read_deltas(root: &Path, epoch: u64) -> Vec<Delta> {
+    let data = fs::read(delta_path(root)).unwrap_or_default();
+    parse_log(&data, epoch).0
 }
 
 /// Size and modification time of the running executable: changes whenever it is rebuilt.
@@ -80,7 +197,7 @@ pub fn lock(root: &Path) -> Result<fs::File> {
 }
 
 /// All import aliases of a project: tsconfig's (TypeScript) and composer's (PHP).
-fn import_aliases(root: &Path) -> BTreeMap<String, String> {
+pub fn import_aliases(root: &Path) -> BTreeMap<String, String> {
     let mut aliases = tsconfig_aliases(root);
     aliases.extend(composer_aliases(root));
     aliases
@@ -228,8 +345,11 @@ fn strip_trailing_commas(json: &str) -> String {
 }
 
 /// Write both the JSON graph and the binary cache under `<root>/.claude/`.
-pub fn save(root: &Path, index: &Index) -> Result<()> {
+pub fn save(root: &Path, index: &mut Index) -> Result<()> {
     fs::create_dir_all(root.join(".claude"))?;
+    // A new epoch retires any delta log written for the previous graph.
+    index.epoch = new_epoch();
+    let index = &*index;
     // The readable JSON (the slow half: ~12 ms on tokio) and the binary cache are independent.
     let (json, bin) = std::thread::scope(|scope| {
         let json = scope.spawn(|| -> Result<()> {
@@ -244,7 +364,16 @@ pub fn save(root: &Path, index: &Index) -> Result<()> {
             bin,
         )
     });
+    let _ = fs::remove_file(delta_path(root)); // after the graph: a reader never loses changes
     json.and(bin)
+}
+
+fn new_epoch() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(1, |d| d.as_nanos());
+    // Mixed with the process id so two saves in one clock tick still differ.
+    ((nanos as u64) ^ (u64::from(std::process::id()) << 40)) | 1
 }
 
 /// Write to a temp file, then rename: readers (and parallel hook runs) never see a half-written file.
@@ -279,6 +408,7 @@ pub fn build(root: &Path, previous: Option<&Index>) -> Result<(Index, Stats)> {
     let mut index = Index {
         version: VERSION,
         extractor: fingerprint(),
+        epoch: 0,
         aliases: import_aliases(root),
         files: Default::default(),
     };
@@ -317,6 +447,12 @@ fn read(root: &Path, rel: &str) -> Result<(String, String)> {
     let src = fs::read_to_string(root.join(rel)).with_context(|| format!("reading {rel}"))?;
     let hash = blake3::hash(src.as_bytes()).to_hex().to_string();
     Ok((src, hash))
+}
+
+/// The entry for one file as it is on disk now.
+pub fn entry_for(root: &Path, rel: &str) -> Result<FileEntry> {
+    let (src, hash) = read(root, rel)?;
+    entry_from(rel, &src, hash)
 }
 
 fn entry_from(rel: &str, src: &str, hash: String) -> Result<FileEntry> {
@@ -392,10 +528,119 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "a.rs", "fn a() {}\n");
-        let (index, _) = build(dir.path(), None).unwrap();
-        save(dir.path(), &index).unwrap();
+        let (mut index, _) = build(dir.path(), None).unwrap();
+        save(dir.path(), &mut index).unwrap();
         assert!(graph_path(dir.path()).is_file());
         assert_eq!(load(dir.path()), Some(index));
+    }
+
+    fn saved_project(files: &[(&str, &str)]) -> (tempfile::TempDir, Index) {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, body) in files {
+            write(dir.path(), path, body);
+        }
+        let (mut index, _) = build(dir.path(), None).unwrap();
+        save(dir.path(), &mut index).unwrap();
+        (dir, index)
+    }
+
+    fn entry_of(rel: &str, src: &str) -> FileEntry {
+        entry_from(rel, src, "h".into()).unwrap()
+    }
+
+    fn change(path: &str, entry: Option<FileEntry>) -> Delta {
+        Delta {
+            path: path.into(),
+            entry,
+            aliases: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn deltas_are_applied_on_load_in_order() {
+        let (dir, index) = saved_project(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let root = dir.path();
+        let deltas = [
+            change("a.rs", Some(entry_of("a.rs", "fn renamed() {}\n"))),
+            change("b.rs", None),
+            change("c.rs", Some(entry_of("c.rs", "fn c() {}\n"))),
+        ];
+        append_deltas(root, index.epoch, &deltas[..2]).unwrap();
+        append_deltas(root, index.epoch, &deltas[2..]).unwrap();
+        let loaded = load(root).unwrap();
+        assert_eq!(loaded.files["a.rs"].symbols[0].name, "renamed");
+        assert!(!loaded.files.contains_key("b.rs"));
+        assert!(loaded.files.contains_key("c.rs"));
+        assert_eq!(fast_base(root).map(|b| b.0), Some(index.epoch));
+    }
+
+    #[test]
+    fn a_log_of_another_epoch_or_a_torn_record_is_ignored() {
+        let (dir, index) = saved_project(&[("a.rs", "fn a() {}\n")]);
+        let root = dir.path();
+        let renamed = change("a.rs", Some(entry_of("a.rs", "fn renamed() {}\n")));
+        append_deltas(root, index.epoch + 2, std::slice::from_ref(&renamed)).unwrap();
+        assert_eq!(load(root).unwrap().files["a.rs"].symbols[0].name, "a");
+        // Right epoch again: replaces the stale log. Then cut the last record in half.
+        append_deltas(root, index.epoch, std::slice::from_ref(&renamed)).unwrap();
+        assert_eq!(load(root).unwrap().files["a.rs"].symbols[0].name, "renamed");
+        let path = delta_path(root);
+        let bytes = fs::read(&path).unwrap();
+        fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
+        assert_eq!(load(root).unwrap().files["a.rs"].symbols[0].name, "a");
+    }
+
+    #[test]
+    fn an_append_after_a_torn_record_is_still_read() {
+        let (dir, index) = saved_project(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let root = dir.path();
+        let first = change("a.rs", Some(entry_of("a.rs", "fn one() {}\n")));
+        append_deltas(root, index.epoch, &[first]).unwrap();
+        let path = delta_path(root);
+        let mut torn = fs::read(&path).unwrap();
+        torn.extend([9, 0, 0, 0, 1, 2]); // a record that claims 9 bytes and has 2
+        fs::write(&path, torn).unwrap();
+        let second = change("b.rs", Some(entry_of("b.rs", "fn two() {}\n")));
+        append_deltas(root, index.epoch, &[second]).unwrap();
+        let loaded = load(root).unwrap();
+        assert_eq!(loaded.files["a.rs"].symbols[0].name, "one");
+        assert_eq!(loaded.files["b.rs"].symbols[0].name, "two");
+    }
+
+    #[test]
+    fn the_header_prefix_gives_epoch_and_aliases_without_the_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.rs", "fn a() {}\n");
+        let (mut index, _) = build(dir.path(), None).unwrap();
+        index.aliases.insert("@/".into(), "src/".into());
+        save(dir.path(), &mut index).unwrap();
+        let (epoch, aliases) = fast_base(dir.path()).unwrap();
+        assert_eq!((epoch, &aliases), (index.epoch, &index.aliases));
+        // The last delta's aliases win over the graph's own.
+        let newer = BTreeMap::from([("~/".to_string(), "lib/".to_string())]);
+        let moved = Delta {
+            path: "a.rs".into(),
+            entry: None,
+            aliases: newer.clone(),
+        };
+        append_deltas(dir.path(), epoch, &[moved]).unwrap();
+        assert_eq!(fast_base(dir.path()).unwrap().1, newer);
+    }
+
+    #[test]
+    fn a_full_save_retires_the_log() {
+        let (dir, index) = saved_project(&[("a.rs", "fn a() {}\n")]);
+        let root = dir.path();
+        append_deltas(root, index.epoch, &[change("a.rs", None)]).unwrap();
+        assert!(delta_len(root) > 0 && load(root).unwrap().files.is_empty());
+        let mut again = load(root).unwrap();
+        save(root, &mut again).unwrap();
+        assert_eq!(delta_len(root), 0);
+        assert_ne!(again.epoch, index.epoch);
+        assert!(
+            load(root).unwrap().files.is_empty(),
+            "the deleted file stays deleted"
+        );
     }
 
     #[test]
@@ -404,7 +649,7 @@ mod tests {
         write(dir.path(), "a.rs", "fn a() {}\n");
         let (mut index, _) = build(dir.path(), None).unwrap();
         index.version = VERSION - 1; // e.g. a v5 graph.bin, before `Form::Returned`
-        save(dir.path(), &index).unwrap();
+        save(dir.path(), &mut index).unwrap();
         assert_eq!(load(dir.path()), None);
     }
 
@@ -455,7 +700,7 @@ mod tests {
         write(dir.path(), "a.rs", "fn a() {}\n");
         let (mut index, _) = build(dir.path(), None).unwrap();
         index.extractor = "some-older-build".into();
-        save(dir.path(), &index).unwrap();
+        save(dir.path(), &mut index).unwrap();
         assert_eq!(load(dir.path()), None);
     }
 

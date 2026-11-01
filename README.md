@@ -6,7 +6,7 @@ fewer tokens. Rust, TypeScript/TSX, JavaScript, Python, Java, Kotlin, PHP, Ruby,
 
 ## Usage
 ```
-codegraph index [dir]        # writes .claude/codemap.md and .claude/graph.json (incremental)
+codegraph index [dir]        # writes .claude/codemap.md and .claude/graph.json (incremental); `update` after an edit only logs the change (delta.bin) and patches codemap.md, so graph.json lags until the next full index
 codegraph query "<question>" # plain English: matching symbols + what they call / are called by (--depth, --budget tokens, --dfs)
 codegraph tour               # reading order: entry files, then the key file of each cluster (--top N)
 codegraph def <name>         # path:line signature (--teach adds what the keywords mean + the doc comment)

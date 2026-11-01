@@ -204,8 +204,8 @@ mod tests {
     fn project() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "pub fn a() {}\n").unwrap();
-        let (idx, _) = index::build(dir.path(), None).unwrap();
-        index::save(dir.path(), &idx).unwrap();
+        let (mut idx, _) = index::build(dir.path(), None).unwrap();
+        index::save(dir.path(), &mut idx).unwrap();
         dir
     }
 

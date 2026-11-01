@@ -283,6 +283,9 @@ pub struct Index {
     pub version: u32,
     /// Identifies the binary that built this graph; a rebuilt binary may extract differently.
     pub extractor: String,
+    /// Changes on every full save; a delta log is only valid for the graph with the same epoch.
+    /// Must stay right after `extractor`: `index::fast_base` decodes just those first fields (version, extractor, epoch, aliases).
+    pub epoch: u64,
     /// TypeScript import aliases from tsconfig.json: prefix -> folder, e.g. `"@/"` -> `"src/"`.
     pub aliases: BTreeMap<String, String>,
     pub files: BTreeMap<String, FileEntry>,

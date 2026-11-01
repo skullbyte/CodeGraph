@@ -21,7 +21,7 @@ briefly as you go (one short sentence per new term).
    - Parallel parsing (rayon); incremental: skip files whose hash didn't change (cache in .claude/).
    - Respect .gitignore; skip node_modules, target, Library, build, dist.
    - Commands:
-     `codegraph index [dir]`    → .claude/codemap.md (format below) + .claude/graph.json
+     `codegraph index [dir]`    → .claude/codemap.md (format below) + .claude/graph.json (`update` of an edited file only appends to .claude/delta.bin and patches codemap.md; graph.json is rewritten by the next full save)
      `codegraph update <file>`  → re-index one file (used by the format hook)
      `codegraph watch [dir]`    → re-index on file changes
      `codegraph def <name>`     → `path:line signature`
