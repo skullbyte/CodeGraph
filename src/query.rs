@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::lang::Lang;
 use crate::model::{FileEntry, Index, Kind, Resolution};
+use crate::tour::is_side_path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DefHit {
@@ -492,6 +493,20 @@ impl Link {
     }
 }
 
+impl Link {
+    /// Like `text`, without the site count when it is one.
+    fn brief_text(&self) -> String {
+        let mut out = match &self.location {
+            Some(loc) => format!("{}  {loc}", self.name),
+            None => self.name.clone(),
+        };
+        if self.sites > 1 {
+            out.push_str(&format!(" ({} sites)", self.sites));
+        }
+        out
+    }
+}
+
 /// Everything about one name: where it is defined, who calls it, what it calls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Explain {
@@ -502,6 +517,41 @@ pub struct Explain {
 
 /// Longest list printed in text mode; `--json` always has everything.
 const LIST_LIMIT: usize = 20;
+
+/// How much of an `explain` answer to print.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// A few definitions and neighbours, tests last: the default, cheap in tokens.
+    #[default]
+    Brief,
+    /// Every definition and up to `LIST_LIMIT` neighbours per direction.
+    Full,
+    Callers,
+    Callees,
+    Defs,
+}
+
+impl std::str::FromStr for Mode {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Mode, String> {
+        match text {
+            "brief" => Ok(Mode::Brief),
+            "full" => Ok(Mode::Full),
+            "callers" => Ok(Mode::Callers),
+            "callees" => Ok(Mode::Callees),
+            "defs" => Ok(Mode::Defs),
+            other => Err(format!(
+                "unknown mode `{other}`: use brief, full, callers, callees or defs"
+            )),
+        }
+    }
+}
+
+/// What brief mode shows: definitions, and neighbours per direction.
+const BRIEF_LIMIT: usize = 5;
+/// Longest signature brief mode prints.
+const BRIEF_SIGNATURE: usize = 80;
 
 impl Explain {
     pub fn lines(&self) -> Vec<String> {
@@ -527,6 +577,84 @@ impl Explain {
             }
         }
         out
+    }
+
+    /// The answer in `mode`, with `under(def)` right below each printed `def` line.
+    pub fn lines_in(&self, mode: Mode, under: impl Fn(&DefHit) -> Vec<String>) -> Vec<String> {
+        match mode {
+            Mode::Full => self.lines_with(under),
+            Mode::Brief => self.brief(under),
+            Mode::Defs => self.defs_lines(&self.defs, under),
+            Mode::Callers => Self::link_lines("<-", &self.incoming),
+            Mode::Callees => Self::link_lines("->", &self.outgoing),
+        }
+    }
+
+    fn defs_lines(&self, defs: &[DefHit], under: impl Fn(&DefHit) -> Vec<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in defs {
+            out.push(format!("def {}", d.text()));
+            out.extend(under(d));
+        }
+        out
+    }
+
+    fn link_lines(arrow: &str, links: &[Link]) -> Vec<String> {
+        if links.is_empty() {
+            return vec![format!("{arrow} (none)")]; // so "nobody" is not mistaken for an error
+        }
+        let mut out: Vec<String> = links
+            .iter()
+            .take(LIST_LIMIT)
+            .map(|l| format!("{arrow} {}", l.text()))
+            .collect();
+        if links.len() > LIST_LIMIT {
+            out.push(format!("{arrow} ... {} more", links.len() - LIST_LIMIT));
+        }
+        out
+    }
+
+    fn brief(&self, under: impl Fn(&DefHit) -> Vec<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in self.defs.iter().take(BRIEF_LIMIT) {
+            let signature = cut(&d.signature, BRIEF_SIGNATURE);
+            out.push(format!("def {}:{} {signature}", d.path, d.line));
+            out.extend(under(d));
+        }
+        if self.defs.len() > BRIEF_LIMIT {
+            out.push(format!(
+                "def ... +{} more (mode=defs)",
+                self.defs.len() - BRIEF_LIMIT
+            ));
+        }
+        for (arrow, links, more) in [
+            ("<-", &self.incoming, "callers"),
+            ("->", &self.outgoing, "callees"),
+        ] {
+            let mut ordered: Vec<&Link> = links.iter().collect();
+            ordered.sort_by_key(|l| l.location.as_deref().is_some_and(is_side_path));
+            out.extend(
+                ordered
+                    .iter()
+                    .take(BRIEF_LIMIT)
+                    .map(|l| format!("{arrow} {}", l.brief_text())),
+            );
+            if links.len() > BRIEF_LIMIT {
+                out.push(format!(
+                    "{arrow} ... +{} more (mode={more})",
+                    links.len() - BRIEF_LIMIT
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// `text` cut to `max` characters, with `...` when something was dropped.
+fn cut(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}...", &text[..end]),
+        None => text.to_string(),
     }
 }
 
@@ -1515,5 +1643,141 @@ mod tests {
             .map(|l| l.name.clone())
             .collect();
         assert_eq!(names, vec!["user"]);
+    }
+
+    fn link(name: &str, loc: Option<&str>, sites: usize) -> Link {
+        Link {
+            name: name.into(),
+            location: loc.map(String::from),
+            sites,
+        }
+    }
+
+    fn crowded() -> Explain {
+        let long = "x".repeat(120);
+        Explain {
+            defs: (1..=7)
+                .map(|n| DefHit {
+                    path: format!("src/d{n}.rs"),
+                    line: n,
+                    signature: long.clone(),
+                })
+                .collect(),
+            incoming: vec![
+                link("t1", Some("tests/a.rs:1"), 9),
+                link("c1", Some("src/c1.rs:1"), 3),
+                link("c2", Some("src/c2.rs:1"), 1),
+                link("c3", None, 1),
+                link("c4", Some("src/c4.rs:1"), 1),
+                link("c5", Some("src/c5.rs:1"), 1),
+                link("c6", Some("src/c6.rs:1"), 1),
+                link("t2", Some("src/x_test.go:1"), 1),
+            ],
+            outgoing: vec![link("o1", Some("src/o.rs:1"), 2), link("o2", None, 1)],
+        }
+    }
+
+    #[test]
+    fn brief_caps_definitions_cuts_signatures_and_says_how_to_see_more() {
+        let lines = crowded().lines_in(Mode::Brief, |_| Vec::new());
+        let defs: Vec<_> = lines.iter().filter(|l| l.starts_with("def ")).collect();
+        assert_eq!(defs.len(), 6, "5 definitions and one more-line");
+        assert!(defs[0].len() < "def src/d1.rs:1 ".len() + 85, "{}", defs[0]);
+        assert!(defs[0].ends_with("..."));
+        assert_eq!(defs[5].as_str(), "def ... +2 more (mode=defs)");
+    }
+
+    #[test]
+    fn brief_lists_five_neighbours_tests_last_and_sites_only_above_one() {
+        let lines = crowded().lines_in(Mode::Brief, |_| Vec::new());
+        let incoming: Vec<_> = lines.iter().filter(|l| l.starts_with("<-")).collect();
+        assert_eq!(
+            incoming,
+            vec![
+                "<- c1  src/c1.rs:1 (3 sites)",
+                "<- c2  src/c2.rs:1",
+                "<- c3",
+                "<- c4  src/c4.rs:1",
+                "<- c5  src/c5.rs:1",
+                "<- ... +3 more (mode=callers)",
+            ]
+        );
+        let outgoing: Vec<_> = lines.iter().filter(|l| l.starts_with("->")).collect();
+        assert_eq!(outgoing, vec!["-> o1  src/o.rs:1 (2 sites)", "-> o2"]);
+    }
+
+    #[test]
+    fn full_is_the_old_output_and_modes_pick_one_part() {
+        let e = crowded();
+        assert_eq!(e.lines_in(Mode::Full, |_| Vec::new()), e.lines());
+        let only = |mode, prefix: &str| {
+            let lines = e.lines_in(mode, |_| Vec::new());
+            !lines.is_empty() && lines.iter().all(|l| l.starts_with(prefix))
+        };
+        assert!(only(Mode::Defs, "def "));
+        assert!(only(Mode::Callers, "<-"));
+        assert!(only(Mode::Callees, "->"));
+    }
+
+    #[test]
+    fn modes_parse_from_their_names() {
+        for (text, mode) in [
+            ("brief", Mode::Brief),
+            ("full", Mode::Full),
+            ("callers", Mode::Callers),
+            ("callees", Mode::Callees),
+            ("defs", Mode::Defs),
+        ] {
+            assert_eq!(text.parse::<Mode>(), Ok(mode));
+        }
+        assert!("everything".parse::<Mode>().is_err());
+        assert_eq!(Mode::default(), Mode::Brief);
+    }
+
+    #[test]
+    fn brief_hands_each_original_definition_to_the_teach_hook() {
+        let same_place = |sig: &str| DefHit {
+            path: "A.kt".into(),
+            line: 1,
+            signature: sig.into(),
+        };
+        let e = Explain {
+            defs: vec![same_place("class A"), same_place("constructor")],
+            incoming: vec![],
+            outgoing: vec![],
+        };
+        let lines = e.lines_in(Mode::Brief, |d| vec![format!("  u:{}", d.signature)]);
+        assert_eq!(
+            lines,
+            vec![
+                "def A.kt:1 class A",
+                "  u:class A",
+                "def A.kt:1 constructor",
+                "  u:constructor"
+            ]
+        );
+    }
+
+    #[test]
+    fn cutting_text_never_splits_a_character_and_an_empty_list_says_none() {
+        let long = "é".repeat(90);
+        let cut_text = cut(&long, 80);
+        assert_eq!(cut_text.chars().count(), 83);
+        assert!(cut_text.ends_with("..."));
+        assert_eq!(cut("short", 80), "short");
+        let nobody = Explain {
+            defs: vec![],
+            incoming: vec![],
+            outgoing: vec![],
+        };
+        assert_eq!(
+            nobody.lines_in(Mode::Callers, |_| Vec::new()),
+            ["<- (none)"]
+        );
+        assert_eq!(
+            nobody.lines_in(Mode::Callees, |_| Vec::new()),
+            ["-> (none)"]
+        );
+        assert!(nobody.lines_in(Mode::Brief, |_| Vec::new()).is_empty());
     }
 }

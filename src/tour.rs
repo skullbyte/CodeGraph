@@ -93,21 +93,42 @@ pub fn tour(root: &Path, index: &Index, top: usize) -> Vec<Stop> {
         .collect()
 }
 
+/// Folders that hold tests, benchmarks, examples and fixtures rather than the product.
+const SIDE: [&str; 8] = [
+    "tests",
+    "test",
+    "__tests__",
+    "fixtures",
+    "benches",
+    "bench",
+    "examples",
+    "node_modules",
+];
+
+/// Is this path test, benchmark, example or fixture code? By folder (`tests/`) or by file name
+/// (`foo_test.go`, `test_foo.py`, `FooTest.kt`, `FooTests.swift`, `foo_spec.rb`, `a.test.ts`).
+pub(crate) fn is_side_path(path: &str) -> bool {
+    let (dirs, file) = path.rsplit_once('/').unwrap_or(("", path));
+    if dirs.split('/').any(|part| SIDE.contains(&part)) {
+        return true;
+    }
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    let named = |suffix: &str| {
+        stem.strip_suffix(suffix)
+            .is_some_and(|rest| !rest.is_empty())
+    };
+    file.contains(".test.")
+        || file.contains(".spec.")
+        || stem.starts_with("test_")
+        || named("_test")
+        || named("_spec")
+        || named("Test")
+        || named("Tests")
+}
+
 /// Code with at least one definition, outside tests, benchmarks, examples and fixtures.
 fn worth_reading(path: &str, entry: &FileEntry) -> bool {
-    const SIDE: [&str; 8] = [
-        "tests",
-        "test",
-        "__tests__",
-        "fixtures",
-        "benches",
-        "bench",
-        "examples",
-        "node_modules",
-    ];
-    !entry.is_doc()
-        && entry.symbols.iter().any(|s| s.kind.is_code_def())
-        && !path.split('/').any(|part| SIDE.contains(&part))
+    !entry.is_doc() && entry.symbols.iter().any(|s| s.kind.is_code_def()) && !is_side_path(path)
 }
 
 fn entry_files(index: &Index, limit: usize) -> Vec<String> {
@@ -480,5 +501,33 @@ mod tests {
         let stops = tour(dir.path(), &idx, 2);
         assert!(stops[0].path.starts_with("big"), "{stops:?}");
         assert!(stops[1].path.starts_with("small"), "{stops:?}");
+    }
+
+    #[test]
+    fn side_paths_are_tests_benches_examples_and_test_named_files() {
+        for side in [
+            "tests/a.rs",
+            "src/__tests__/x.ts",
+            "bench/b.rs",
+            "node_modules/x/y.js",
+            "pkg/foo_test.go",
+            "pkg/test_foo.py",
+            "app/FooTest.kt",
+            "app/FooTests.swift",
+            "spec/foo_spec.rb",
+            "src/a.test.ts",
+            "src/a.spec.tsx",
+        ] {
+            assert!(is_side_path(side), "{side}");
+        }
+        for code in [
+            "src/latest.rs",
+            "src/contest.go",
+            "src/protest/a.py",
+            "src/Test.kt",
+            "src/testing.rs",
+        ] {
+            assert!(!is_side_path(code), "{code}");
+        }
     }
 }

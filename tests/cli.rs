@@ -142,7 +142,19 @@ fn explain_affected_and_hubs_print_compact_lines() {
     let explain = stdout(&run(dir.path(), &["explain", "beta"]));
     assert_eq!(
         explain,
+        "def src/lib.rs:2 pub fn beta()\n<- show  src/app.ts:1\n-> alpha  src/lib.rs:1\n"
+    );
+    let full = stdout(&run(dir.path(), &["explain", "beta", "--mode", "full"]));
+    assert_eq!(
+        full,
         "def src/lib.rs:2 pub fn beta()\n<- show  src/app.ts:1 (1 site)\n-> alpha  src/lib.rs:1 (1 site)\n"
+    );
+    let callees = stdout(&run(dir.path(), &["explain", "beta", "--mode", "callees"]));
+    assert_eq!(callees, "-> alpha  src/lib.rs:1 (1 site)\n");
+    assert!(
+        !run(dir.path(), &["explain", "beta", "--mode", "nope"])
+            .status
+            .success()
     );
     let affected = stdout(&run(dir.path(), &["affected", "alpha"]));
     assert_eq!(

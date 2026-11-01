@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::query::{DefHit, Explain};
+use crate::query::{DefHit, Explain, Mode};
 use crate::semantic;
 use crate::tour;
 
@@ -269,13 +269,14 @@ pub fn def_lines(root: &Path, hits: &[DefHit], teach_on: bool) -> Vec<String> {
     out
 }
 
-/// `explain` answer lines; with `teach`, `teach` lines under each definition and a `read next` hint.
-pub fn explain_lines(root: &Path, explained: &Explain, teach_on: bool) -> Vec<String> {
+/// `explain` answer lines in `mode`; with `teach`, `teach` lines under each definition and a
+/// `read next` hint.
+pub fn explain_lines(root: &Path, explained: &Explain, teach_on: bool, mode: Mode) -> Vec<String> {
     if !teach_on {
-        return explained.lines();
+        return explained.lines_in(mode, |_| Vec::new());
     }
     let taught = std::cell::Cell::new(0);
-    let mut out = explained.lines_with(|d| {
+    let mut out = explained.lines_in(mode, |d| {
         taught.set(taught.get() + 1);
         if taught.get() > MAX_TAUGHT {
             Vec::new()
@@ -283,7 +284,9 @@ pub fn explain_lines(root: &Path, explained: &Explain, teach_on: bool) -> Vec<St
             teach(root, d)
         }
     });
-    out.extend(read_next(explained));
+    if matches!(mode, Mode::Brief | Mode::Full) {
+        out.extend(read_next(explained));
+    }
     out
 }
 
@@ -642,12 +645,34 @@ mod tests {
             incoming: vec![],
             outgoing: vec![],
         };
-        assert_eq!(explain_lines(dir.path(), &e, false), e.lines());
+        assert_eq!(explain_lines(dir.path(), &e, false, Mode::Full), e.lines());
         assert_eq!(
-            explain_lines(dir.path(), &e, true).len(),
+            explain_lines(dir.path(), &e, true, Mode::Brief).len(),
             2,
             "def line + terms line"
         );
+    }
+
+    #[test]
+    fn read_next_belongs_to_the_overview_modes_only() {
+        use crate::query::Link;
+        let dir = tempfile::tempdir().unwrap();
+        let e = Explain {
+            defs: vec![],
+            incoming: vec![],
+            outgoing: vec![Link {
+                name: "helper".into(),
+                location: Some("a.rs:9".into()),
+                sites: 2,
+            }],
+        };
+        let has_hint = |mode| {
+            explain_lines(dir.path(), &e, true, mode)
+                .iter()
+                .any(|l| l.starts_with("read next"))
+        };
+        assert!(has_hint(Mode::Brief) && has_hint(Mode::Full));
+        assert!(!has_hint(Mode::Callers) && !has_hint(Mode::Callees) && !has_hint(Mode::Defs));
     }
 
     fn hit(path: &str, line: u32, signature: &str) -> DefHit {

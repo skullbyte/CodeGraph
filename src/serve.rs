@@ -147,6 +147,7 @@ impl Server {
                 &root,
                 &semantic::explain_with(index, &store, text(args, "name")?),
                 flag(args, "teach"),
+                mode(args)?,
             ),
             "path" => query::path(index, text(args, "from")?, text(args, "to")?)
                 .iter()
@@ -292,8 +293,12 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "explain",
-            "Definition, callers and callees of a name. teach=true adds plain-language lines.",
-            with(&json!({ "name": name["name"], "teach": { "type": "boolean" } })),
+            "Definition, callers and callees of a name (short by default). teach=true adds plain-language lines.",
+            with(&json!({
+                "name": name["name"],
+                "teach": { "type": "boolean" },
+                "mode": { "type": "string", "enum": ["brief", "full", "callers", "callees", "defs"] }
+            })),
             &["name"],
         ),
         tool(
@@ -335,6 +340,17 @@ fn tools() -> Vec<Value> {
 /// An optional true/false argument; anything but `true` counts as false.
 fn flag(args: &Value, key: &str) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// The optional `mode` of `explain`: brief when absent.
+fn mode(args: &Value) -> Result<query::Mode, String> {
+    match args.get("mode") {
+        None | Some(Value::Null) => Ok(query::Mode::default()),
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| "argument `mode` must be a string".to_string())?
+            .parse(),
+    }
 }
 
 /// A required, bounded string argument.
@@ -582,6 +598,30 @@ mod tests {
             "{} bytes",
             listed.to_string().len()
         );
+    }
+
+    #[test]
+    fn explain_takes_an_optional_mode() {
+        let dir = project();
+        let mut server = Server::new(dir.path());
+        let by = |server: &mut Server, args: Value| call(server, "explain", args);
+        let brief = by(&mut server, json!({ "name": "alpha" }));
+        let full = by(&mut server, json!({ "name": "alpha", "mode": "full" }));
+        assert!(!brief.1 && !full.1);
+        assert_eq!(
+            brief.0,
+            full.0.replace(" (1 site)", ""),
+            "a tiny answer differs only by the single-site count"
+        );
+        let callers = by(&mut server, json!({ "name": "alpha", "mode": "callers" })).0;
+        assert!(callers.lines().all(|l| l.starts_with("<-")), "{callers}");
+        let bad = by(
+            &mut server,
+            json!({ "name": "alpha", "mode": "everything" }),
+        );
+        assert!(bad.1 && bad.0.contains("unknown mode"), "{bad:?}");
+        let not_text = by(&mut server, json!({ "name": "alpha", "mode": 3 }));
+        assert!(not_text.1);
     }
 
     #[test]

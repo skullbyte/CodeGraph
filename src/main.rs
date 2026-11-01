@@ -78,6 +78,9 @@ enum Command {
         /// Add plain-language lines: what the keywords mean, the doc comment, what to read next (text output only).
         #[arg(long)]
         teach: bool,
+        /// How much to print: brief (default), full, callers, callees or defs (--json is always full).
+        #[arg(long, default_value = "brief")]
+        mode: query::Mode,
     },
     /// Everything that depends on <name>: its callers, their callers, and so on.
     Affected {
@@ -269,13 +272,13 @@ fn run(cli: Cli) -> Result<()> {
             print_results(&hops, cli.json, Hop::text)
         }
         Command::Update { file } => cmd_update(&cli.dir, file),
-        Command::Explain { name, teach } => {
+        Command::Explain { name, teach, mode } => {
             let explained =
                 semantic::explain_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name);
             if cli.json {
                 println!("{}", serde_json::to_string(&explained)?);
             } else {
-                glossary::explain_lines(&cli.dir, &explained, *teach)
+                glossary::explain_lines(&cli.dir, &explained, *teach, *mode)
                     .iter()
                     .for_each(|line| println!("{line}"));
             }
