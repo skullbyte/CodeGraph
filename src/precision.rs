@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::model::{FileEntry, Index, Resolution};
+use crate::scope::{Def, Resolver, Tier};
 
 /// One way of choosing among the definitions of a name, scored against SCIP.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -42,18 +43,48 @@ pub struct Report {
     pub scores: Vec<Score>,
 }
 
-/// A project definition: file and 1-based line, as SCIP names it.
-type Def = (String, u32);
+/// Picks candidate definitions (indexes into the name's definition list) for a call made in
+/// `file`. More strategies are added next to these as resolution gets smarter.
+type Strategy = fn(&Resolver, &FileEntry, &[Def]) -> Vec<usize>;
 
-/// Picks candidate definitions (indexes into the name's definition list) for call number `call`
-/// of `file`. More strategies are added next to `name_only` as resolution gets smarter.
-type Strategy = fn(&Index, &FileEntry, usize, &[Def]) -> Vec<usize>;
+const STRATEGIES: [(&str, Strategy); 5] = [
+    ("name", name_only),
+    ("same-file", same_file),
+    ("imported", imported),
+    ("same-folder", same_folder),
+    ("scope", by_scope),
+];
 
-const STRATEGIES: [(&str, Strategy); 1] = [("name", name_only)];
+/// One tier alone: its definitions when it has any, else every definition (it did not apply).
+fn tier_or_all(resolver: &Resolver, tier: Tier, file: &FileEntry, defs: &[Def]) -> Vec<usize> {
+    let hits = resolver.in_tier(tier, &file.path, defs);
+    if hits.is_empty() {
+        (0..defs.len()).collect()
+    } else {
+        hits
+    }
+}
+
+fn same_file(resolver: &Resolver, file: &FileEntry, defs: &[Def]) -> Vec<usize> {
+    tier_or_all(resolver, Tier::SameFile, file, defs)
+}
+
+fn imported(resolver: &Resolver, file: &FileEntry, defs: &[Def]) -> Vec<usize> {
+    tier_or_all(resolver, Tier::Imported, file, defs)
+}
+
+fn same_folder(resolver: &Resolver, file: &FileEntry, defs: &[Def]) -> Vec<usize> {
+    tier_or_all(resolver, Tier::SameFolder, file, defs)
+}
 
 /// Today's rule: every definition of the name is a candidate.
-fn name_only(_: &Index, _: &FileEntry, _: usize, defs: &[Def]) -> Vec<usize> {
+fn name_only(_: &Resolver, _: &FileEntry, defs: &[Def]) -> Vec<usize> {
     (0..defs.len()).collect()
+}
+
+/// Same file, else an imported file, else the same folder (`scope.rs`).
+fn by_scope(resolver: &Resolver, file: &FileEntry, defs: &[Def]) -> Vec<usize> {
+    resolver.narrow(&file.path, defs)
 }
 
 /// Project definitions by name (`impl` blocks and doc headings do not count).
@@ -75,6 +106,7 @@ fn definitions(index: &Index) -> HashMap<&str, Vec<Def>> {
 
 pub fn measure(index: &Index) -> Report {
     let defs = definitions(index);
+    let resolver = Resolver::new(index);
     let mut report = Report {
         scores: STRATEGIES
             .iter()
@@ -108,7 +140,7 @@ pub fn measure(index: &Index) -> Report {
             };
             report.truth += 1;
             for ((_, pick), score) in STRATEGIES.iter().zip(&mut report.scores) {
-                score.add(&pick(index, file, i, candidates), truth, candidates.len());
+                score.add(&pick(&resolver, file, candidates), truth, candidates.len());
             }
         }
     }

@@ -17,6 +17,7 @@ pub mod precision;
 pub mod query;
 pub mod report;
 pub mod scip;
+pub mod scope;
 pub mod semantic;
 pub mod serve;
 pub mod tour;
