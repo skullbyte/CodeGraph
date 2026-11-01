@@ -1,6 +1,6 @@
 //! TypeScript/TSX extraction: walks the syntax tree and records declarations, imports and calls.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tree_sitter::Node;
 
@@ -10,10 +10,13 @@ use crate::model::{Call, Form, Kind, Symbol};
 pub fn extract(root: Node, src: &str) -> Facts {
     let mut facts = Facts::default();
     let modules = module_names(root, src);
+    let empty = Locals::new();
     let ctx = Ctx {
         enclosing: None,
         container: None,
         modules: &modules,
+        locals: &empty,
+        fields: None,
     };
     visit(root, src, &mut facts, ctx);
     facts
@@ -21,13 +24,29 @@ pub fn extract(root: Node, src: &str) -> Facts {
 
 /// Where the walk is: the innermost function (`enclosing`), the class or interface whose members
 /// we are reading (`container`, also the owner of the calls inside), and which local names are
-/// imported from another file (name -> module name, see `module_stem`).
+/// imported from another file (name -> module name, see `module_stem`). `locals` are the declared
+/// types of parameters and variables in reach, `fields` those of the current class's members
+/// (both name -> type name), which tell what `x.f()` and `this.x.f()` are called on.
 #[derive(Clone, Copy)]
 struct Ctx<'a> {
     enclosing: Option<&'a str>,
     container: Option<&'a str>,
     modules: &'a HashMap<String, String>,
+    locals: &'a Locals,
+    fields: Option<&'a Types>,
 }
+
+type Types = HashMap<String, String>;
+/// Declared names in reach: `Some(type)`, or `None` when the name is declared but its type unknown.
+type Locals = HashMap<String, Option<String>>;
+
+const FUNCTIONS: [&str; 5] = [
+    "function_declaration",
+    "generator_function_declaration",
+    "method_definition",
+    "arrow_function",
+    "function_expression",
+];
 
 /// Depth-first walk.
 fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
@@ -37,6 +56,7 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
         "function_declaration" | "generator_function_declaration" => {
             own = add_item(node, Kind::Fn, src, facts, None).map(|s| caller_name(&s));
             inner.container = None; // a nested function has no `this`
+            inner.fields = None;
         }
         "function_signature" => _ = add_item(node, Kind::Fn, src, facts, None),
         "method_definition" => {
@@ -54,8 +74,8 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
             inner.container = field_text(node, "name", src);
         }
         // `this` inside these is not the surrounding class.
-        "object" | "function_expression" => inner.container = None,
-        "class" => inner.container = declarator_name(node, src),
+        "object" | "function_expression" => (inner.container, inner.fields) = (None, None),
+        "class" => (inner.container, inner.fields) = (declarator_name(node, src), None),
         "type_alias_declaration" => _ = add_item(node, Kind::Type, src, facts, None),
         "enum_declaration" => _ = add_item(node, Kind::Enum, src, facts, None),
         "variable_declarator" => own = add_variable(node, src, facts),
@@ -64,6 +84,20 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
         _ => {}
     }
     inner.enclosing = own.as_deref().or(ctx.enclosing);
+    let locals = FUNCTIONS
+        .contains(&node.kind())
+        .then(|| local_types(node, src, ctx.locals));
+    if let Some(l) = &locals {
+        inner.locals = l;
+    }
+    let fields = matches!(
+        node.kind(),
+        "class_declaration" | "abstract_class_declaration" | "class"
+    )
+    .then(|| field_types(node, src));
+    if let Some(f) = &fields {
+        inner.fields = Some(f);
+    }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         visit(child, src, facts, inner);
@@ -281,28 +315,35 @@ fn add_call(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
             callee: callee.to_string(),
             line: line_of(node),
             caller: ctx.enclosing.map(String::from),
-            form: call_form(f, src, ctx.modules),
+            form: call_form(f, src, ctx),
             owner: ctx.container.map(String::from),
         });
     }
 }
 
 /// How a call is written: `f()`, `this.f()`, `Foo.f()`, `ns.f()` or `value.f()`.
-fn call_form(function: Node, src: &str, modules: &HashMap<String, String>) -> Form {
+fn call_form(function: Node, src: &str, ctx: Ctx) -> Form {
+    let modules = ctx.modules;
     if function.kind() == "identifier" {
-        return match modules.get(text(function, src)) {
+        let name = text(function, src);
+        if ctx.locals.contains_key(name) {
+            return Form::Bare; // a parameter or local, not the import of the same name
+        }
+        return match modules.get(name) {
             Some(m) => Form::Module(m.clone()),
             None => Form::Bare,
         };
     }
-    let Some(object) = function.child_by_field_name("object") else {
+    let Some(object) = function.child_by_field_name("object").map(skip_non_null) else {
         return Form::Unknown;
     };
     match object.kind() {
         "this" => Form::SelfRef,
         "identifier" => {
             let name = text(object, src);
-            if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            if let Some(declared) = ctx.locals.get(name) {
+                declared.clone().map_or(Form::Method, Form::Type)
+            } else if name.starts_with(|c: char| c.is_ascii_uppercase()) {
                 Form::Type(name.to_string()) // a class, even when imported
             } else if let Some(m) = modules.get(name) {
                 Form::Module(m.clone())
@@ -310,12 +351,238 @@ fn call_form(function: Node, src: &str, modules: &HashMap<String, String>) -> Fo
                 Form::Method
             }
         }
-        // `z.util.f()`: a sub-module of an imported namespace.
-        "member_expression" => match namespace_root(object, src, modules) {
-            Some(sub) => Form::Module(sub.to_string()),
-            None => Form::Method,
-        },
+        "member_expression" => {
+            if let Some(t) = ctx.fields.and_then(|f| this_field_type(object, src, f)) {
+                Form::Type(t.to_string()) // `this.repo.find()`
+            } else if let Some(sub) = namespace_root(object, src, modules) {
+                Form::Module(sub.to_string()) // `z.util.f()`: a sub-module of a namespace
+            } else {
+                Form::Method
+            }
+        }
         _ => Form::Method,
+    }
+}
+
+/// The declared type of `this.name`, for the object of a call `this.name.f()`.
+fn this_field_type<'a>(object: Node, src: &str, fields: &'a Types) -> Option<&'a str> {
+    let base = skip_non_null(object.child_by_field_name("object")?);
+    if base.kind() != "this" {
+        return None;
+    }
+    let name = field_text(object, "property", src)?;
+    fields.get(name).map(String::as_str)
+}
+
+/// Syntax that only describes types: parameters in it are not declarations of the function.
+fn is_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "type_annotation"
+            | "function_type"
+            | "object_type"
+            | "type_alias_declaration"
+            | "interface_declaration"
+    )
+}
+
+/// `x!` is `x` for our purposes.
+fn skip_non_null(node: Node) -> Node {
+    match node.kind() {
+        "non_null_expression" => node.named_child(0).map_or(node, skip_non_null),
+        _ => node,
+    }
+}
+
+/// A type written as a plain or generic or qualified name: `T`, `Box<T>`, `ns.T` -> `T`, `Box`;
+/// unions, arrays, functions, literals and the type parameters in `generics` give `None`.
+fn type_name(node: Node, src: &str, generics: &HashSet<String>) -> Option<String> {
+    let node = if node.kind() == "type_annotation" {
+        node.named_child(0)?
+    } else {
+        node
+    };
+    let name = match node.kind() {
+        "type_identifier" => text(node, src).to_string(),
+        "generic_type" => return type_name(node.child_by_field_name("name")?, src, generics),
+        "nested_type_identifier" => field_text(node, "name", src)?.to_string(),
+        _ => return None,
+    };
+    (!generics.contains(&name)).then_some(name)
+}
+
+/// The type of a declared name: its annotation, else the class it is built with (`new T()`).
+fn declared_type(node: Node, src: &str, generics: &HashSet<String>) -> Option<String> {
+    let annotated = node.child_by_field_name("type");
+    if let Some(t) = annotated.and_then(|t| type_name(t, src, generics)) {
+        return Some(t);
+    }
+    let value = node
+        .child_by_field_name("value")
+        .filter(|_| annotated.is_none())?;
+    if value.kind() != "new_expression" {
+        return None;
+    }
+    let ctor = value.child_by_field_name("constructor")?;
+    (ctor.kind() == "identifier").then(|| text(ctor, src).to_string())
+}
+
+/// Names of the type parameters (`<T, R>`) of `node` and everything around it.
+fn generic_names(node: Node, src: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut up = Some(node);
+    while let Some(n) = up {
+        if let Some(list) = n.child_by_field_name("type_parameters") {
+            let mut cursor = list.walk();
+            for param in list.named_children(&mut cursor) {
+                names.extend(field_text(param, "name", src).map(String::from));
+            }
+        }
+        up = n.parent();
+    }
+    names
+}
+
+/// Every name a binding pattern introduces (`x`, `{ a, b: c }`, `[d, ...e]`, `{ f = 1 }`).
+fn bound_names(pattern: Node, src: &str, out: &mut Vec<String>) {
+    match pattern.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            out.push(text(pattern, src).to_string());
+        }
+        // `{ a: c }` binds `c`, not the key `a`.
+        "pair_pattern" => {
+            if let Some(value) = pattern.child_by_field_name("value") {
+                bound_names(value, src, out);
+            }
+        }
+        // `x = dflt` binds `x`; the default value is an expression.
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(left) = pattern.child_by_field_name("left") {
+                bound_names(left, src, out);
+            }
+        }
+        _ => {
+            let mut cursor = pattern.walk();
+            for child in pattern.named_children(&mut cursor) {
+                bound_names(child, src, out);
+            }
+        }
+    }
+}
+
+/// Types of the parameters and variables a function declares itself (not in nested functions),
+/// on top of those of the functions around it. A name declared again without a type, with
+/// another type, or inside a destructuring pattern is unknown: better no type than a wrong one.
+fn local_types(func: Node, src: &str, outer: &Locals) -> Locals {
+    let generics = generic_names(func, src);
+    let mut own: HashMap<String, Option<String>> = HashMap::new();
+    let mut declare = |name: String, ty: Option<String>| {
+        own.entry(name)
+            .and_modify(|seen| {
+                if *seen != ty {
+                    *seen = None;
+                }
+            })
+            .or_insert(ty);
+    };
+    let mut stack = vec![func];
+    while let Some(n) = stack.pop() {
+        let pattern = match n.kind() {
+            "required_parameter" | "optional_parameter" => n.child_by_field_name("pattern"),
+            "variable_declarator" => n.child_by_field_name("name"),
+            _ => None,
+        };
+        let untyped = match n.kind() {
+            "arrow_function" => n.child_by_field_name("parameter"), // `x => ...`
+            "catch_clause" => n.child_by_field_name("parameter"),
+            // `for (const x of xs)` declares x; a bare `for (x of xs)` only assigns it.
+            "for_in_statement" if n.child_by_field_name("kind").is_some() => {
+                n.child_by_field_name("left")
+            }
+            _ => None,
+        };
+        if let Some(untyped) = untyped {
+            let mut names = Vec::new();
+            bound_names(untyped, src, &mut names);
+            names.into_iter().for_each(|name| declare(name, None));
+        }
+        if let Some(pattern) = pattern {
+            if pattern.kind() == "identifier" {
+                declare(
+                    text(pattern, src).to_string(),
+                    declared_type(n, src, &generics),
+                );
+            } else {
+                let mut names = Vec::new();
+                bound_names(pattern, src, &mut names);
+                names.into_iter().for_each(|name| declare(name, None));
+            }
+        }
+        let mut cursor = n.walk();
+        let children: Vec<_> = n.named_children(&mut cursor).collect();
+        stack.extend(
+            children
+                .into_iter()
+                .rev()
+                .filter(|c| n == func || !(FUNCTIONS.contains(&c.kind()) || is_type(c.kind()))),
+        );
+    }
+    let mut all = outer.clone();
+    all.extend(own);
+    all
+}
+
+/// Types of a class's fields (`repo: Repo`, `log = new Logger()`) and constructor parameter
+/// properties (`constructor(private db: Db)`), by name.
+fn field_types(class: Node, src: &str) -> Types {
+    let mut fields = Types::new();
+    let Some(body) = class.child_by_field_name("body") else {
+        return fields;
+    };
+    let generics = generic_names(class, src);
+    let mut cursor = body.walk();
+    for member in body.named_children(&mut cursor) {
+        match member.kind() {
+            "public_field_definition" => {
+                if let (Some(name), Some(t)) = (
+                    field_text(member, "name", src),
+                    declared_type(member, src, &generics),
+                ) {
+                    fields.entry(name.to_string()).or_insert(t);
+                }
+            }
+            "method_definition" if field_text(member, "name", src) == Some("constructor") => {
+                add_parameter_properties(member, src, &generics, &mut fields);
+            }
+            _ => {}
+        }
+    }
+    fields
+}
+
+fn add_parameter_properties(
+    constructor: Node,
+    src: &str,
+    generics: &HashSet<String>,
+    fields: &mut Types,
+) {
+    let Some(params) = constructor.child_by_field_name("parameters") else {
+        return;
+    };
+    let mut cursor = params.walk();
+    for p in params.named_children(&mut cursor) {
+        let property = p.children(&mut p.walk()).any(|c| {
+            matches!(
+                c.kind(),
+                "accessibility_modifier" | "override_modifier" | "readonly"
+            )
+        });
+        let name = p
+            .child_by_field_name("pattern")
+            .filter(|n| n.kind() == "identifier");
+        if let (true, Some(name), Some(t)) = (property, name, declared_type(p, src, generics)) {
+            fields.entry(text(name, src).to_string()).or_insert(t);
+        }
     }
 }
 
@@ -500,6 +767,238 @@ function local() { show(1); }
     fn declare_overloads_are_one_symbol_too() {
         let src = "declare function f(a: string): A;\ndeclare function f(a: number): B;\nexport declare function g(a: string): A;\nexport declare function g(a: number): B;\n";
         assert_eq!(members(src), vec![sym("f", None, 1), sym("g", None, 3)]);
+    }
+
+    #[test]
+    fn a_receiver_with_a_known_type_is_a_call_on_that_type() {
+        let src = "class Svc {
+  private repo: Repo;
+  logger = new Logger();
+  constructor(private db: Db) {}
+  run(x: Item, y?: Other) {
+    const a = new Thing();
+    const b: Typed = make();
+    this.repo.find(); this.logger.log(); this.db.q();
+    x.go(); y.stop(); a.hit(); b.beat(); unknown.f();
+  }
+}
+";
+        let t = |n: &str| Form::Type(n.into());
+        let got: Vec<_> = forms(src).into_iter().map(|(c, f, _)| (c, f)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("make".to_string(), Form::Bare),
+                ("find".into(), t("Repo")),
+                ("log".into(), t("Logger")),
+                ("q".into(), t("Db")),
+                ("go".into(), t("Item")),
+                ("stop".into(), t("Other")),
+                ("hit".into(), t("Thing")),
+                ("beat".into(), t("Typed")),
+                ("f".into(), Form::Method),
+            ]
+        );
+    }
+
+    #[test]
+    fn types_are_scoped_to_their_function_and_class() {
+        let src = "class A { r: One; m() { this.r.a(); } }
+class B { r: Two; m() { this.r.b(); } }
+function f(x: P) { x.p(); }
+function g(x: Q) { x.q(); }
+function h() { x.z(); }
+";
+        let got: Vec<_> = forms(src).into_iter().map(|(c, f, _)| (c, f)).collect();
+        let t = |n: &str| Form::Type(n.into());
+        assert_eq!(
+            got,
+            vec![
+                ("a".to_string(), t("One")),
+                ("b".into(), t("Two")),
+                ("p".into(), t("P")),
+                ("q".into(), t("Q")),
+                ("z".into(), Form::Method),
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_and_qualified_types_use_their_base_name_and_unions_are_unknown() {
+        let src = "function f(a: Box<T>, b: ns.Thing, c: A | B, d: string[]) { a.x(); b.y(); c.z(); d.w(); }\n";
+        let got: Vec<_> = forms(src).into_iter().map(|(c, f, _)| (c, f)).collect();
+        let t = |n: &str| Form::Type(n.into());
+        assert_eq!(
+            got,
+            vec![
+                ("x".to_string(), t("Box")),
+                ("y".into(), t("Thing")),
+                ("z".into(), Form::Method),
+                ("w".into(), Form::Method),
+            ]
+        );
+    }
+
+    fn call_forms(src: &str) -> Vec<(String, Form)> {
+        forms(src).into_iter().map(|(c, f, _)| (c, f)).collect()
+    }
+
+    fn typed(callee: &str, t: &str) -> (String, Form) {
+        (callee.into(), Form::Type(t.into()))
+    }
+
+    fn method(callee: &str) -> (String, Form) {
+        (callee.into(), Form::Method)
+    }
+
+    #[test]
+    fn an_untyped_or_destructured_shadow_hides_the_outer_type() {
+        let src =
+            "function f(x: Foo) { items.map(x => x.a()); items.map(({ x }) => x.b()); x.c(); }\n";
+        assert_eq!(
+            call_forms(src),
+            vec![
+                method("map"),
+                method("a"),
+                method("map"),
+                method("b"),
+                typed("c", "Foo")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_declared_twice_with_different_types_is_unknown() {
+        let src = "function f() { { const x: A = g(); x.a(); } { const x: B = g(); x.b(); } }\nfunction h(y: P) { const y2 = 1; y.c(); const y = k(); }\n";
+        let got = call_forms(src);
+        assert!(got.contains(&method("a")) && got.contains(&method("b")));
+        assert!(
+            got.contains(&method("c")),
+            "an untyped redeclaration makes it unknown"
+        );
+    }
+
+    #[test]
+    fn a_type_parameter_is_not_a_class() {
+        let src = "function f<T>(x: T, y: U) { x.a(); y.b(); }\nclass C<R> { r: R; m() { this.r.c(); } }\n";
+        assert_eq!(
+            call_forms(src),
+            vec![method("a"), typed("b", "U"), method("c")]
+        );
+    }
+
+    #[test]
+    fn this_fields_follow_this_through_arrows_but_not_nested_functions() {
+        let src = "class C {\n  r: R;\n  m() {\n    items.map(() => this.r.a());\n    const f = function () { this.r.b(); };\n    const o = { n() { this.r.c(); } };\n    this.r.d();\n  }\n}\nconst K = class { q: Q; m() { this.q.e(); } };\n";
+        let got = call_forms(src);
+        let find = |n: &str| got.iter().find(|c| c.0 == n).unwrap().1.clone();
+        assert_eq!(find("a"), Form::Type("R".into()));
+        assert_eq!(find("b"), Form::Method);
+        assert_eq!(find("c"), Form::Method);
+        assert_eq!(find("d"), Form::Type("R".into()));
+        assert_eq!(find("e"), Form::Type("Q".into()));
+    }
+
+    #[test]
+    fn readonly_and_override_parameter_properties_and_non_null_receivers() {
+        let src = "class C {\n  constructor(readonly db: Db, override log: Log, plain: P) {}\n  m(x: X) { this.db.a(); this.log.b(); this.plain.c(); x!.d(); this.db!.e(); }\n}\n";
+        assert_eq!(
+            call_forms(src),
+            vec![
+                typed("a", "Db"),
+                typed("b", "Log"),
+                method("c"),
+                typed("d", "X"),
+                typed("e", "Db")
+            ]
+        );
+    }
+
+    #[test]
+    fn inner_functions_inherit_outer_types_and_do_not_leak_theirs() {
+        let src =
+            "function f(x: Foo) { const g = () => x.a(); function h(z: Zed) { z.b(); } z.c(); }\n";
+        assert_eq!(
+            call_forms(src),
+            vec![typed("a", "Foo"), typed("b", "Zed"), method("c")]
+        );
+    }
+
+    #[test]
+    fn a_typed_local_beats_a_module_name_and_a_call_before_its_declaration_is_typed() {
+        let src = "import * as util from './util';\nfunction f(util: Thing) { util.a(); X.b(); late.c(); const late: Late = mk(); }\n";
+        assert_eq!(
+            call_forms(src),
+            vec![
+                typed("a", "Thing"),
+                typed("b", "X"),
+                typed("c", "Late"),
+                ("mk".into(), Form::Bare)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_catch_parameter_hides_an_outer_type() {
+        let src = "function f(e: Err) { try { g(); } catch (e) { e.a(); } e.b(); }\n";
+        let got = call_forms(src);
+        assert!(got.contains(&method("a")) && got.contains(&method("b")));
+    }
+
+    #[test]
+    fn a_loop_variable_hides_an_outer_type_but_a_bare_assignment_does_not() {
+        let src = "function f(x: Foo, y: Bar, z: Baz) { for (const x of xs) x.a(); for (const { y } of ys) y.b(); for (z of zs) z.c(); }\n";
+        assert_eq!(
+            call_forms(src),
+            vec![method("a"), method("b"), typed("c", "Baz")]
+        );
+    }
+
+    #[test]
+    fn parameters_inside_type_annotations_are_not_locals() {
+        let src = "function f() { const cb: (x: Foo) => void = g; x.run(); }\n";
+        assert!(call_forms(src).contains(&method("run")));
+    }
+
+    #[test]
+    fn an_untyped_local_shadows_an_imported_namespace() {
+        let src =
+            "import * as z from './z';\nfunction f(z) { z.go(); }\nfunction g() { z.stay(); }\n";
+        assert_eq!(
+            call_forms(src),
+            vec![method("go"), ("stay".into(), Form::Module("z".into()))]
+        );
+    }
+
+    #[test]
+    fn a_parameter_that_shadows_an_imported_function_is_a_bare_call() {
+        let src = "import { run } from './run';\nfunction f(run: Fn) { run(); }\nfunction g() { run(); }\n";
+        assert_eq!(
+            call_forms(src),
+            vec![
+                ("run".into(), Form::Bare),
+                ("run".into(), Form::Module("run".into()))
+            ]
+        );
+    }
+
+    #[test]
+    fn renamed_and_defaulted_destructuring_binds_the_right_names() {
+        let src = "function f(c: Foo, d: Dee, e: Eee) {
+  const { a: c } = o; c.one();
+  const { x = d } = o; d.two(); x.three();
+  const [p = e] = o; e.four();
+}
+";
+        assert_eq!(
+            call_forms(src),
+            vec![
+                method("one"),
+                typed("two", "Dee"),
+                method("three"),
+                typed("four", "Eee")
+            ]
+        );
     }
 
     #[test]
