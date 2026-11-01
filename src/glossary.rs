@@ -13,8 +13,8 @@ const MAX_TERMS: usize = 4;
 /// Only this many hits of one answer are taught (each reads part of a file).
 const MAX_TAUGHT: usize = 10;
 
-/// One row per (language group, word). Groups: rust, ts (also JS), py, go, java, kt, php, rb, cs, c (also C++).
-const TABLE: [(&str, &str, &str); 78] = [
+/// One row per (language group, word). Groups: rust, ts (also JS), py, go, java, kt, php, rb, swift, cs, c (also C++).
+const TABLE: [(&str, &str, &str); 83] = [
     ("rust", "pub", "visible outside its module"),
     (
         "rust",
@@ -111,6 +111,15 @@ const TABLE: [(&str, &str, &str); 78] = [
     ),
     ("rb", "self", "the object the method is called on"),
     ("rb", "nil", "no value"),
+    ("swift", "func", "a function"),
+    ("swift", "let", "a name whose value never changes"),
+    ("swift", "var", "a name whose value can change"),
+    (
+        "swift",
+        "struct",
+        "a record with named fields, copied when passed around",
+    ),
+    ("swift", "protocol", "methods a type promises to have"),
     ("c", "template", "code that works for many types"),
     ("c", "*", "a pointer: the address of a value"),
 ];
@@ -125,6 +134,7 @@ fn group_of(path: &str) -> Option<&'static str> {
         "kt" | "kts" => Some("kt"),
         "php" => Some("php"),
         "rb" | "rake" => Some("rb"),
+        "swift" => Some("swift"),
         "cs" => Some("cs"),
         "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" => Some("c"),
         _ => None,
@@ -458,6 +468,7 @@ mod tests {
             ["public", "static", "function"]
         );
         assert_eq!(words("def go(self)", "a.rb"), ["def", "self"]);
+        assert_eq!(words("func run() async", "a.swift"), ["func"]);
         assert_eq!(
             words("static int f(const char *s)", "a.c"),
             ["static", "const", "*"]
