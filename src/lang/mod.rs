@@ -149,9 +149,12 @@ pub(crate) fn field_text<'a>(node: Node, field: &str, src: &'a str) -> Option<&'
 }
 
 /// One-line declaration text from `start` up to `body` (or the first line when there is no body).
+/// Lines that only hold an annotation (`@Name`, `@Name(..)`, also over several lines) come first
+/// in some languages (Kotlin, Java) and say nothing about the declaration, so they are skipped.
 pub(crate) fn signature(start: Node, body: Option<Node>, src: &str) -> String {
     let end = body.map_or(start.end_byte(), |b| b.start_byte());
     let raw = src.get(start.start_byte()..end).unwrap_or("");
+    let raw = without_annotation_lines(raw);
     let raw = if body.is_some() {
         raw
     } else {
@@ -160,6 +163,67 @@ pub(crate) fn signature(start: Node, body: Option<Node>, src: &str) -> String {
     let joined = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = joined.trim_end_matches(['{', ' ']);
     trimmed.chars().take(110).collect()
+}
+
+/// `text` without its leading annotation-only lines; unchanged when nothing else would be left.
+fn without_annotation_lines(text: &str) -> &str {
+    let mut rest = text;
+    while let Some(line_end) = annotation_end(rest) {
+        let after = &rest[line_end..];
+        if after.trim().is_empty() {
+            return rest;
+        }
+        rest = after;
+    }
+    rest
+}
+
+/// Byte length of the leading annotation (with its line break) when `text` starts with a line
+/// that is only an annotation, e.g. `@Name\n` or `@Name(\n  "x"\n)\n`; None otherwise.
+fn annotation_end(text: &str) -> Option<usize> {
+    let trimmed = text.trim_start();
+    let lead = text.len() - trimmed.len();
+    let body = trimmed.strip_prefix('@')?;
+    let name_len = body
+        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | ':')))
+        .unwrap_or(body.len());
+    if name_len == 0 {
+        return None;
+    }
+    let mut at = lead + 1 + name_len;
+    let after = &text[at..];
+    if let Some(args) = after.strip_prefix('(') {
+        // Find the matching `)` (parentheses inside "strings" do not count); text after it on the
+        // same line means a real declaration follows.
+        let mut depth = 1;
+        let mut close = None;
+        let mut quoted = false;
+        let mut escaped = false;
+        for (i, c) in args.char_indices() {
+            if quoted {
+                quoted = escaped || c != '"';
+                escaped = c == '\\' && !escaped;
+                continue;
+            }
+            match c {
+                '"' => quoted = true,
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        at += 1 + close? + 1;
+    }
+    let tail = &text[at..];
+    let line_len = tail.find('\n').map_or(tail.len(), |i| i + 1);
+    let rest = tail[..line_len].trim();
+    (rest.is_empty() || rest.starts_with("//")).then_some(at + line_len)
 }
 
 /// Name shown after "in" for callers: the signature up to its first `(` or `<`
@@ -182,4 +246,35 @@ pub(crate) fn caller_name(signature: &str) -> String {
 /// 1-based line number, as editors and `rg -n` show it.
 pub(crate) fn line_of(node: Node) -> u32 {
     u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_annotation_lines as skip;
+
+    #[test]
+    fn leading_annotation_lines_are_skipped_in_every_syntax() {
+        assert_eq!(skip("@available(macOS 10.15, *)\nfunc f()"), "func f()");
+        assert_eq!(
+            skip("@Component({a: (1)})\nexport class X"),
+            "export class X"
+        );
+        assert_eq!(skip("@dataclass\nclass X:"), "class X:");
+        assert_eq!(skip("@Ñandú\nclass Ü"), "class Ü");
+        assert_eq!(skip("@Foo(\")\")\nclass X"), "class X");
+        assert_eq!(skip("@Foo(\"a\\\"(\")\nclass X"), "class X");
+        assert_eq!(skip("@Foo // note\nclass X"), "class X");
+        assert_eq!(skip("@A\n@B(1)\n@C\nfun f()"), "fun f()");
+    }
+
+    #[test]
+    fn real_declarations_and_odd_input_are_left_alone() {
+        assert_eq!(skip("@Foo class X"), "@Foo class X");
+        assert_eq!(skip("@interface Foo {"), "@interface Foo {");
+        assert_eq!(skip("@Foo"), "@Foo", "never leave nothing");
+        assert_eq!(skip("@Foo(\nclass X"), "@Foo(\nclass X");
+        assert_eq!(skip("@\nclass X"), "@\nclass X");
+        assert_eq!(skip("fn f()"), "fn f()");
+        assert_eq!(skip(""), "");
+    }
 }

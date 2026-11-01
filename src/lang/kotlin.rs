@@ -189,6 +189,24 @@ fun helper(x: Int) {}
     }
 
     #[test]
+    fn annotation_lines_are_not_the_signature() {
+        let facts = extract_file(
+            Lang::Kotlin,
+            "/** doc */\n@OkHttpInternalApi\n@Suppress(\"x\")\nclass RealCall(\n  val n: Int,\n) : Call {\n}\n@Foo class Same(val n: Int) {\n}\n@Deprecated(\n  \"old\"\n)\nfun f() = 1\n",
+        )
+        .unwrap();
+        let sigs: Vec<_> = facts.symbols.iter().map(|s| s.signature.as_str()).collect();
+        assert_eq!(
+            sigs,
+            vec![
+                "class RealCall(",
+                "@Foo class Same(val n: Int)",
+                "fun f() = 1"
+            ]
+        );
+    }
+
+    #[test]
     fn extensions_are_picked_up() {
         assert_eq!(Lang::from_path("a/B.kt"), Some(Lang::Kotlin));
         assert_eq!(Lang::from_path("build.gradle.kts"), Some(Lang::Kotlin));

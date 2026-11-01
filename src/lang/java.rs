@@ -135,6 +135,17 @@ public class Store {
 ";
 
     #[test]
+    fn annotation_lines_are_not_the_signature() {
+        let facts = extract_file(
+            Lang::Java,
+            "@Deprecated\n@SuppressWarnings(\"x\")\npublic class A {\n    @Override\n    public void run() {}\n}\n",
+        )
+        .unwrap();
+        let sigs: Vec<_> = facts.symbols.iter().map(|s| s.signature.as_str()).collect();
+        assert_eq!(sigs, vec!["public class A", "public void run()"]);
+    }
+
+    #[test]
     fn symbols() {
         let facts = extract_file(Lang::Java, SRC).unwrap();
         let got: Vec<_> = facts
