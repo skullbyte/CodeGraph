@@ -1,5 +1,7 @@
 //! Rust extraction: walks the syntax tree and records items, `use`/`mod` imports and calls.
 
+use std::collections::{HashMap, HashSet};
+
 use tree_sitter::{Node, Parser};
 
 use super::{Facts, caller_name, field_text, line_of, signature, text};
@@ -15,11 +17,25 @@ struct Ctx<'a> {
     container: Option<&'a str>,
     /// The nearest enclosing body is an `impl` or `trait` (not a function): its `fn`s are methods.
     in_type_body: bool,
+    /// Declared names of the current `fn`, with their type when it is known.
+    locals: Option<&'a Locals>,
+    /// Field types of the structs in this file, by (struct, field).
+    fields: Option<&'a Fields>,
 }
+
+/// Name -> `Some(type)`, or `None` when the name is declared but its type is not known (declared
+/// twice, a pattern, a closure parameter, a generic).
+type Locals = HashMap<String, Option<String>>;
+type Fields = HashMap<(String, String), String>;
 
 pub fn extract(root: Node, src: &str) -> Facts {
     let mut facts = Facts::default();
-    visit(root, src, &mut facts, Ctx::default());
+    let fields = struct_fields(root, src);
+    let ctx = Ctx {
+        fields: Some(&fields),
+        ..Ctx::default()
+    };
+    visit(root, src, &mut facts, ctx);
     facts
 }
 
@@ -74,7 +90,7 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
         "call_expression" => {
             let function = node.child_by_field_name("function");
             let callee = function.and_then(|f| callee_name(f, src));
-            let form = function.map_or(Form::Unknown, |f| form_of(f, src));
+            let form = function.map_or(Form::Unknown, |f| form_of(f, src, ctx));
             add_call(node, callee, form, facts, ctx);
         }
         "macro_invocation" => {
@@ -96,6 +112,10 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
         _ => {}
     }
     inner.enclosing = own.as_deref().or(ctx.enclosing);
+    let locals = (node.kind() == "function_item").then(|| local_types(node, src, ctx.owner));
+    if let Some(l) = &locals {
+        inner.locals = Some(l);
+    }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         visit(child, src, facts, inner);
@@ -239,8 +259,9 @@ fn add_call(node: Node, callee: Option<&str>, form: Form, facts: &mut Facts, ctx
     }
 }
 
-/// `Foo<T>`, `&'a mut Foo`, `dyn Foo`, `a::b::Foo<T>`, `Vec::<u8>` -> `Foo`, `Foo`, `Foo`, `Foo`, `Vec`.
-fn type_name(ty: &str) -> &str {
+/// `Foo<T>`, `&'a mut Foo`, `dyn Foo`, `a::b::Foo<T>`, `Vec::<u8>` -> `a::b::Foo` and so on: the
+/// path of a written type without references, lifetimes, `dyn`/`impl` and generic arguments.
+fn type_path(ty: &str) -> &str {
     let mut ty = ty.trim();
     while let Some(rest) = ty
         .strip_prefix('&')
@@ -255,8 +276,13 @@ fn type_name(ty: &str) -> &str {
     {
         ty = rest.trim_start();
     }
-    let ty = ty.split('<').next().unwrap_or(ty).trim_end_matches("::");
-    ty.rsplit("::").next().unwrap_or(ty).trim()
+    ty.split('<').next().unwrap_or(ty).trim_end_matches("::")
+}
+
+/// `Foo<T>`, `&'a mut Foo`, `dyn Foo`, `a::b::Foo<T>`, `Vec::<u8>` -> `Foo`, `Foo`, `Foo`, `Foo`, `Vec`.
+fn type_name(ty: &str) -> &str {
+    let path = type_path(ty);
+    path.rsplit("::").next().unwrap_or(path).trim()
 }
 
 /// Primitive types: `u64::from(x)` is a method of a std type, not a function of a module `u64`.
@@ -282,15 +308,15 @@ fn qualified(qualifier: Option<&str>) -> Form {
 
 /// How a call is written: `f()` bare, `self.f()` / `Self::f()` own method, `Foo::f()` a member of
 /// type Foo, `m::f()` a function of module m, `x.f()` a method of an unseen type.
-fn form_of(f: Node, src: &str) -> Form {
+fn form_of(f: Node, src: &str, ctx: Ctx) -> Form {
     match f.kind() {
         "identifier" => Form::Bare,
         "generic_function" => f
             .child_by_field_name("function")
-            .map_or(Form::Unknown, |inner| form_of(inner, src)),
-        "field_expression" => match f.child_by_field_name("value").map(|v| text(v, src)) {
-            Some("self") => Form::SelfRef,
-            Some(_) => Form::Method,
+            .map_or(Form::Unknown, |inner| form_of(inner, src, ctx)),
+        "field_expression" => match f.child_by_field_name("value") {
+            Some(v) if text(v, src) == "self" => Form::SelfRef,
+            Some(v) => receiver_type(v, src, ctx).map_or(Form::Method, Form::Type),
             None => Form::Unknown,
         },
         "scoped_identifier" => {
@@ -303,6 +329,230 @@ fn form_of(f: Node, src: &str) -> Form {
         }
         _ => Form::Unknown,
     }
+}
+
+/// The declared type of a method call's receiver: a local with a known type, or `self.field`.
+fn receiver_type(value: Node, src: &str, ctx: Ctx) -> Option<String> {
+    match value.kind() {
+        "identifier" => ctx.locals?.get(text(value, src)).cloned().flatten(),
+        "field_expression" => {
+            let base = value.child_by_field_name("value")?;
+            let field = field_text(value, "field", src)?;
+            if text(base, src) != "self" {
+                return None;
+            }
+            ctx.fields?
+                .get(&(ctx.owner?.to_string(), field.to_string()))
+                .cloned()
+        }
+        _ => None,
+    }
+}
+
+/// A written type as a class we can look up: `&mut Foo<T>` -> `Foo`; primitives, tuples, arrays,
+/// function types, type parameters and anything that is not a plain name give `None`.
+fn known_type(ty: &str, generics: &HashSet<String>, owner: Option<&str>) -> Option<String> {
+    let name = type_name(ty);
+    // `I::Item`, `Self::Output`, `T::Error`: an associated type, not a class named like its tail.
+    let path = type_path(ty);
+    let head = path.split("::").next().unwrap_or(path);
+    if path.contains("::") && (head == "Self" || generics.contains(head)) {
+        return None;
+    }
+    let plain = name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+        && name != "_"
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+    // Smart pointers hand their method calls to what they wrap: their own name says nothing.
+    const WRAPPERS: [&str; 8] = [
+        "Box", "Rc", "Arc", "RefCell", "Mutex", "RwLock", "Cow", "Pin",
+    ];
+    if !plain || PRIMITIVES.contains(&name) || generics.contains(name) || WRAPPERS.contains(&name) {
+        return None;
+    }
+    match name {
+        "Self" => owner.map(String::from),
+        _ => Some(name.to_string()),
+    }
+}
+
+/// The class a value expression builds: `Foo::new(..)`, `Foo::default()`, `Foo { .. }`, each
+/// optionally followed by `?` or `.await`. Anything else (a function that returns who knows what)
+/// says nothing.
+fn built_type(
+    value: Node,
+    src: &str,
+    generics: &HashSet<String>,
+    owner: Option<&str>,
+) -> Option<String> {
+    match value.kind() {
+        "try_expression" | "await_expression" => {
+            built_type(value.named_child(0)?, src, generics, owner)
+        }
+        "struct_expression" => {
+            // `Shape::Circle { .. }` builds an enum variant of `Shape`.
+            let path = type_path(field_text(value, "name", src)?);
+            let mut segments = path.rsplit("::");
+            let last = segments.next()?;
+            let class = match segments.next() {
+                Some(parent) if parent.starts_with(|c: char| c.is_uppercase()) => parent,
+                _ => last,
+            };
+            known_type(class, generics, owner)
+        }
+        "call_expression" => {
+            let f = value.child_by_field_name("function")?;
+            if f.kind() != "scoped_identifier"
+                || !matches!(field_text(f, "name", src)?, "new" | "default")
+            {
+                return None;
+            }
+            let class = type_name(text(f.child_by_field_name("path")?, src));
+            class
+                .starts_with(|c: char| c.is_uppercase())
+                .then(|| known_type(class, generics, owner))
+                .flatten()
+        }
+        _ => None,
+    }
+}
+
+/// The type parameters (`<T: Tr, U>`) of `node` and of the items around it.
+fn generic_names(node: Node, src: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut up = Some(node);
+    while let Some(n) = up {
+        if let Some(list) = n.child_by_field_name("type_parameters") {
+            let mut cursor = list.walk();
+            for param in list.named_children(&mut cursor) {
+                let name = match param.kind() {
+                    "type_parameter" => field_text(param, "name", src),
+                    _ => None,
+                };
+                names.extend(name.map(String::from));
+            }
+        }
+        up = n.parent();
+    }
+    names
+}
+
+/// Every plain name a pattern binds (and some paths such as `Some`, which do no harm).
+fn pattern_names(pattern: Node, src: &str, out: &mut Vec<String>) {
+    if matches!(pattern.kind(), "identifier" | "shorthand_field_identifier") {
+        out.push(text(pattern, src).to_string());
+        return;
+    }
+    let mut cursor = pattern.walk();
+    for child in pattern.named_children(&mut cursor) {
+        pattern_names(child, src, out);
+    }
+}
+
+/// The declared types of the names a `fn` introduces (parameters, `let`, patterns, closure
+/// parameters), not looking into nested items. A name declared twice with different types, in a
+/// pattern or as a closure parameter is unknown: no type is better than a wrong one.
+fn local_types(func: Node, src: &str, owner: Option<&str>) -> Locals {
+    let generics = generic_names(func, src);
+    let mut seen: Locals = HashMap::new();
+    let mut declare = |name: String, ty: Option<String>| {
+        seen.entry(name)
+            .and_modify(|old| {
+                if *old != ty {
+                    *old = None;
+                }
+            })
+            .or_insert(ty);
+    };
+    let mut stack = vec![func];
+    while let Some(n) = stack.pop() {
+        let typed = |decl: Node, pattern: Option<Node>| -> Option<String> {
+            pattern.filter(|p| p.kind() == "identifier")?;
+            decl.child_by_field_name("type")
+                .and_then(|t| known_type(text(t, src), &generics, owner))
+        };
+        match n.kind() {
+            "parameter" | "let_declaration" => {
+                let pattern = n.child_by_field_name("pattern");
+                let ty = typed(n, pattern).or_else(|| {
+                    let value = n.child_by_field_name("value")?;
+                    // `let x = T::new()` shows what it is when no annotation said so.
+                    built_type(value, src, &generics, owner)
+                });
+                if let Some(p) = pattern {
+                    let mut names = Vec::new();
+                    pattern_names(p, src, &mut names);
+                    let single = p.kind() == "identifier";
+                    for name in names {
+                        declare(name, if single { ty.clone() } else { None });
+                    }
+                }
+            }
+            "for_expression" | "let_condition" | "match_arm" => {
+                if let Some(p) = n.child_by_field_name("pattern") {
+                    let mut names = Vec::new();
+                    pattern_names(p, src, &mut names);
+                    names.into_iter().for_each(|name| declare(name, None));
+                }
+            }
+            "closure_parameters" => {
+                let mut cursor = n.walk();
+                for param in n
+                    .named_children(&mut cursor)
+                    .filter(|c| c.kind() != "parameter")
+                {
+                    let mut names = Vec::new();
+                    pattern_names(param, src, &mut names);
+                    names.into_iter().for_each(|name| declare(name, None));
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = n.walk();
+        let children: Vec<_> = n.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev().filter(|c| {
+            !matches!(
+                c.kind(),
+                "function_item" | "impl_item" | "trait_item" | "mod_item"
+            )
+        }));
+    }
+    seen
+}
+
+/// Field types of every `struct` in a file, by (struct name, field name). Two structs of the
+/// same name (in different modules) that disagree about a field leave it out.
+fn struct_fields(root: Node, src: &str) -> Fields {
+    let mut seen: HashMap<(String, String), Option<String>> = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "struct_item"
+            && let (Some(name), Some(body)) =
+                (field_text(n, "name", src), n.child_by_field_name("body"))
+        {
+            let generics = generic_names(n, src);
+            let mut cursor = body.walk();
+            for field in body.named_children(&mut cursor) {
+                let Some(fname) = field_text(field, "name", src) else {
+                    continue;
+                };
+                let known = field
+                    .child_by_field_name("type")
+                    .and_then(|ty| known_type(text(ty, src), &generics, Some(name)));
+                seen.entry((name.to_string(), fname.to_string()))
+                    .and_modify(|old| {
+                        if *old != known {
+                            *old = None;
+                        }
+                    })
+                    .or_insert(known);
+            }
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+    seen.into_iter()
+        .filter_map(|(key, ty)| Some((key, ty?)))
+        .collect()
 }
 
 /// The called name: `f()` -> f, `a::f()` -> f, `x.f()` -> f, `f::<T>()` -> f.
@@ -721,6 +971,229 @@ fn outer() {
         assert_eq!(
             callers,
             vec![Some("pub(crate) fn a"), Some("pub(in crate::m) fn b")]
+        );
+    }
+
+    fn method_forms(src: &str) -> Vec<(String, Form)> {
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        facts
+            .calls
+            .iter()
+            .filter(|c| !matches!(c.form, Form::Bare | Form::Type(_)) || c.callee.len() > 1)
+            .map(|c| (c.callee.clone(), c.form.clone()))
+            .collect()
+    }
+
+    fn ty(t: &str) -> Form {
+        Form::Type(t.to_string())
+    }
+
+    #[test]
+    fn a_receiver_with_a_known_type_is_a_call_on_that_type() {
+        let src = "struct Repo { db: Db, n: u32 }
+impl Repo {
+    fn run(&self, x: &Item, y: &mut Other<T>, z: impl Tr) {
+        let a = Thing::new(1);
+        let b = Made::default();
+        let c: Typed = make();
+        let d = Lit { v: 1 };
+        let e = Try::new()?;
+        self.db.qq();
+        x.go(); y.stop(); z.tt(); a.hit(); b.mm(); c.beat(); d.ll(); e.t2(); w.unknown();
+    }
+}
+";
+        let got: Vec<_> = method_forms(src)
+            .into_iter()
+            .filter(|(n, _)| !matches!(n.as_str(), "new" | "default" | "make"))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("qq".to_string(), ty("Db")),
+                ("go".into(), ty("Item")),
+                ("stop".into(), ty("Other")),
+                ("tt".into(), ty("Tr")),
+                ("hit".into(), ty("Thing")),
+                ("mm".into(), ty("Made")),
+                ("beat".into(), ty("Typed")),
+                ("ll".into(), ty("Lit")),
+                ("t2".into(), ty("Try")),
+                ("unknown".into(), Form::Method),
+            ]
+        );
+    }
+
+    #[test]
+    fn shadowing_generics_and_patterns_make_a_receiver_unknown() {
+        let src = "fn f<T: Tr>(x: Foo, g: T, p: Pair) {
+    let x = other();
+    x.a();
+    g.b();
+    let y: A = mk();
+    let y: B = mk();
+    y.c();
+    items.iter().map(|x| x.d());
+    if let Some(p) = opt { p.e(); }
+    for (i, p) in it { p.f(); }
+    match v { Ok(x) => x.g2(), _ => {} }
+}
+";
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        let got: Vec<_> = facts
+            .calls
+            .iter()
+            .filter(|c| matches!(c.callee.as_str(), "a" | "b" | "c" | "d" | "e" | "f" | "g2"))
+            .map(|c| (c.callee.clone(), c.form.clone()))
+            .collect();
+        assert_eq!(got.len(), 7);
+        assert!(got.iter().all(|(_, f)| *f == Form::Method), "{got:?}");
+    }
+
+    #[test]
+    fn self_types_and_inner_functions() {
+        let src = "impl Foo {
+    fn new() -> Foo { Foo {} }
+    fn m(&self, s: Self) {
+        let t = Self::new();
+        s.a(); t.b();
+        fn inner() { s.c(); }
+    }
+}
+";
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        let got: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.clone(), c.form.clone()))
+            .collect();
+        let find = |n: &str| got.iter().find(|c| c.0 == n).unwrap().1.clone();
+        assert_eq!(find("a"), ty("Foo"));
+        assert_eq!(find("b"), ty("Foo"));
+        assert_eq!(
+            find("c"),
+            Form::Method,
+            "`s` is not in reach of a nested fn"
+        );
+    }
+
+    fn forms_of(src: &str, names: &[&str]) -> Vec<(String, Form)> {
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        facts
+            .calls
+            .iter()
+            .filter(|c| names.contains(&c.callee.as_str()))
+            .map(|c| (c.callee.clone(), c.form.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn struct_pattern_shorthand_and_rebinding_hide_the_outer_type() {
+        let src = "fn f(x: A, y: B, v: V) {
+    let V { x, .. } = v;
+    x.go();
+    if let W { y: z, .. } = v { z.run(); }
+    let q = Foo::new();
+    let q = q.build();
+    q.finish();
+    y.keep();
+}
+";
+        let got = forms_of(src, &["go", "run", "finish", "keep"]);
+        assert_eq!(
+            got,
+            vec![
+                ("go".to_string(), Form::Method),
+                ("run".into(), Form::Method),
+                ("finish".into(), Form::Method),
+                ("keep".into(), ty("B")),
+            ]
+        );
+    }
+
+    #[test]
+    fn associated_types_and_enum_variants_are_not_classes() {
+        let src = "impl<I: Iterator> Foo<I> {
+    fn f(&self, a: I::Item, b: Self::Output, c: Vec<u8>) {
+        a.go(); b.run();
+        let s = Shape::Circle { r: 1 };
+        s.area();
+        let t = Plain { v: 1 };
+        t.size();
+    }
+}
+";
+        let got = forms_of(src, &["go", "run", "area", "size"]);
+        assert_eq!(
+            got,
+            vec![
+                ("go".to_string(), Form::Method),
+                ("run".into(), Form::Method),
+                ("area".into(), ty("Shape")),
+                ("size".into(), ty("Plain")),
+            ]
+        );
+    }
+
+    #[test]
+    fn same_named_structs_with_different_field_types_make_the_field_unknown() {
+        let src = "mod a { struct S { f: One, g: Same } }
+mod b { struct S { f: Two, g: Same } }
+impl S {
+    fn m(&self) { self.f.go(); self.g.stay(); self.nope.x(); }
+}
+";
+        let got = forms_of(src, &["go", "stay", "x"]);
+        assert_eq!(
+            got,
+            vec![
+                ("go".to_string(), Form::Method),
+                ("stay".into(), ty("Same")),
+                ("x".into(), Form::Method),
+            ]
+        );
+    }
+
+    #[test]
+    fn generics_of_the_impl_and_where_clauses_wrappers_and_tuple_structs() {
+        let src = "struct W<T> { inner: T, boxed: Box<Foo>, n: u32 }
+struct Tup(Foo);
+impl<T> W<T> {
+    fn m<U>(&self, a: T, b: U) where U: Tr {
+        a.one(); b.two(); self.inner.three(); self.boxed.four();
+    }
+}
+";
+        let got = forms_of(src, &["one", "two", "three", "four"]);
+        assert_eq!(
+            got,
+            vec![
+                ("one".to_string(), Form::Method),
+                ("two".into(), Form::Method),
+                ("three".into(), Form::Method),
+                ("four".into(), Form::Method),
+            ]
+        );
+    }
+
+    #[test]
+    fn function_types_inferred_types_and_smart_pointers_say_nothing() {
+        let src = "fn f(cb: fn(u32) -> Foo, g: impl Fn(u32) -> u32, h: Box<Foo>) {
+    let d: _ = Baz::new();
+    let s = Arc::new(Service::new());
+    cb.one(); g.two(); d.three(); s.four(); h.five();
+}
+";
+        let got = forms_of(src, &["one", "two", "three", "four", "five"]);
+        assert_eq!(
+            got,
+            vec![
+                ("one".to_string(), Form::Method),
+                ("two".into(), Form::Method),
+                ("three".into(), ty("Baz")),
+                ("four".into(), Form::Method),
+                ("five".into(), Form::Method),
+            ]
         );
     }
 }
