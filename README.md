@@ -2,7 +2,7 @@
 
 Fast, offline code-graph CLI written in Rust. It answers "where is X", "who calls X" and
 "how does A reach B" with tiny, exact, one-line-per-result output, so AI coding agents spend
-fewer tokens. Rust, TypeScript/TSX, JavaScript, Python, Java, Kotlin, C#, Go and C/C++ are supported (via tree-sitter). C# and Go files link through calls only: their imports name namespaces and packages, not files.
+fewer tokens. Rust, TypeScript/TSX, JavaScript, Python, Java, Kotlin, PHP, C#, Go and C/C++ are supported (via tree-sitter). C# and Go files link through calls only: their imports name namespaces and packages, not files.
 
 ## Usage
 ```

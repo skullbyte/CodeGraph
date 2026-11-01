@@ -265,6 +265,7 @@ fn resolve_import<V>(
         Some(Lang::Python) => resolve_python_module(files, from, imp),
         Some(Lang::Java) => resolve_java_class(files, imp),
         Some(Lang::Kotlin) => resolve_kotlin_class(files, imp),
+        Some(Lang::Php) => resolve_php_class(files, imp),
         Some(Lang::C | Lang::Cpp | Lang::Header | Lang::Markdown) => {
             resolve_include(files, from, imp)
         }
@@ -361,6 +362,20 @@ fn resolve_java_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<Strin
 fn resolve_kotlin_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<String> {
     let base = imp.replace('.', "/");
     single_suffix_match(files, &[format!("{base}.kt"), format!("{base}.kts")])
+}
+
+/// PHP class `App\Util\Fmt` -> `App/Util/Fmt.php`, or with the leading namespace parts dropped
+/// (PSR-4 maps `App\` to a folder like `src/`), but never below two parts, so `use Foo;` makes no
+/// edge: the longest candidate that matches exactly one file wins. A vendor class whose last two
+/// parts equal a project file (`Vendor\Lib\Thing` vs `Lib/Thing.php`) is a known false edge.
+fn resolve_php_class<V>(files: &BTreeMap<String, V>, imp: &str) -> Option<String> {
+    let parts: Vec<&str> = imp.split('\\').filter(|p| !p.is_empty()).collect();
+    (2..=parts.len()).rev().find_map(|n| {
+        single_suffix_match(
+            files,
+            &[format!("{}.php", parts[parts.len() - n..].join("/"))],
+        )
+    })
 }
 
 /// `#include "x.h"`: next to the including file first, else the one project file with that path.
@@ -1057,6 +1072,37 @@ mod tests {
             2
         );
         assert_eq!(local_imports(&index, &index.files[from]).len(), 1);
+    }
+
+    #[test]
+    fn php_imports_resolve_with_or_without_the_root_namespace_folder() {
+        let index = index_of(&[
+            (
+                "src/Controller/Home.php",
+                "<?php\nnamespace App\\Controller;\nuse App\\Model\\Cart;\nuse App\\Model\\Missing;\nuse Vendor\\Lib\\Thing;\nclass Home {}\n",
+            ),
+            (
+                "src/Model/Cart.php",
+                "<?php\nnamespace App\\Model;\nclass Cart {}\n",
+            ),
+        ]);
+        let from = "src/Controller/Home.php";
+        assert_eq!(path(&index, from, "src/Model/Cart.php").len(), 2);
+        assert_eq!(local_imports(&index, &index.files[from]).len(), 1);
+    }
+
+    #[test]
+    fn php_ambiguous_single_part_and_function_imports_make_no_edge() {
+        let index = index_of(&[
+            ("a/Model/Cart.php", "<?php\nclass Cart {}\n"),
+            ("b/Model/Cart.php", "<?php\nclass Cart {}\n"),
+            ("lib/Foo.php", "<?php\nclass Foo {}\n"),
+            (
+                "main.php",
+                "<?php\nuse App\\Model\\Cart;\nuse Foo;\nuse function App\\Lib\\Foo;\nuse App\\{Foo as F};\n",
+            ),
+        ]);
+        assert!(local_imports(&index, &index.files["main.php"]).is_empty());
     }
 
     #[test]

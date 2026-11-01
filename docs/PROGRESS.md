@@ -12,7 +12,7 @@ Next step: pick the first round-2 item in the user's order: more languages, big-
 - [x] Phase 7 (A.7) Documents: markdown scan, `docs pending|ingest|text`, `.claude/semantic.json`, skill `codegraph-docs`, PDFs via `pdf-extract` (done 2026-11-01)
 - [~] Part B: full Graphify parity
   - [x] round 1: `query` (5f76a49), `tour` (62d7c39), `--teach` (24f6bf2 + 0e68c28)
-  - [ ] round 2, in the user's order: [ ] more languages: [x] Kotlin, [ ] PHP, [ ] Ruby, [ ] Swift (one commit each, plan ~/.claude/plans/swirling-cooking-robin.md); [ ] big-graph html view (aggregated above 5000 nodes, --node-limit, --no-viz); [ ] Obsidian `canvas` export; [ ] `label` (LLM-named communities) + `save-result`/`reflect`
+  - [ ] round 2, in the user's order: [ ] more languages: [x] Kotlin, [x] PHP, [ ] Ruby, [ ] Swift (one commit each, plan ~/.claude/plans/swirling-cooking-robin.md); [ ] big-graph html view (aggregated above 5000 nodes, --node-limit, --no-viz); [ ] Obsidian `canvas` export; [ ] `label` (LLM-named communities) + `save-result`/`reflect`
   - [ ] later: stemming for `query` ("notifies" vs `notify`); remaining Graphify commands/exports (see parity checklist)
 - [ ] Open: update on tokio is ~19-21 ms (target < 20 ms); `docs/REQUIREMENTS.md` Part A/B is the source of truth for scope
 
@@ -26,7 +26,7 @@ Compared on 2026-10-28 against Graphify 0.9.97 (source: see CLAUDE.md). `G/` = g
 | Exports (json, html, obsidian, canvas, graphml, svg, cypher/falkordb, wiki, callflow html, tree html) | 3 / 10 (json, html; partial: obsidian, callflow) | 30% |
 | Analysis (communities, god nodes, surprising links, cohesion, suggested questions, dedup, resolution passes, incremental cache, rcfile, query log, security caps, validate) | 5 / 12 | 42% |
 | Web view features | 11 / 16 | 69% |
-| Languages (Graphify has ~45 extractors) | 10 / 45 (Rust, TS/TSX, JS, Python, Java, Kotlin, C#, Go, C, C++) | 22% |
+| Languages (Graphify has ~45 extractors) | 11 / 45 (Rust, TS/TSX, JS, Python, Java, Kotlin, PHP, C#, Go, C, C++) | 24% |
 | Ingest / semantic (docs, PDF, images, audio, Google, Postgres, manifest, URL, LLM pass) | 3 / 9 (markdown scan, PDF text, LLM pass via skill; ours is Claude-Code-only, no API key) | 33% |
 | **Total** | **39 / 118** | **~33%** |
 
