@@ -15,6 +15,7 @@ const CONFIG: Config = Config {
         ("enum_declaration", Kind::Enum),
         ("function_definition", Kind::Fn),
         ("method_declaration", Kind::Fn),
+        ("enum_case", Kind::Const),
     ],
     calls: &[
         "function_call_expression",
@@ -166,13 +167,14 @@ function run() { return (new Store())->add(1); }
                 ("Loud", Kind::Trait, 11),
                 ("shout", Kind::Fn, 11),
                 ("Suit", Kind::Enum, 13),
+                ("Hearts", Kind::Const, 13),
                 ("Store", Kind::Class, 15),
                 ("add", Kind::Fn, 16),
                 ("run", Kind::Fn, 31),
             ]
         );
         assert_eq!(
-            facts.symbols[6].signature,
+            facts.symbols[7].signature,
             "public function add(int $x): void"
         );
     }
@@ -199,6 +201,28 @@ function run() { return (new Store())->add(1); }
                 ("touch", Some("add")),
                 ("add", Some("run")),
                 ("Store", Some("run")),
+            ]
+        );
+    }
+
+    #[test]
+    fn enum_cases_are_constants() {
+        let facts = extract_file(
+            Lang::Php,
+            "<?php\nenum Suit: string { case Hearts = 'h'; case Spades = 's'; }\n",
+        )
+        .unwrap();
+        let got: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Suit", Kind::Enum),
+                ("Hearts", Kind::Const),
+                ("Spades", Kind::Const),
             ]
         );
     }

@@ -13,6 +13,7 @@ const CONFIG: Config = Config {
         ("object_declaration", Kind::Class),
         ("type_alias", Kind::Type),
         ("function_declaration", Kind::Fn),
+        ("enum_entry", Kind::Const),
     ],
     calls: &["call_expression"],
     scopes: &[],
@@ -141,6 +142,44 @@ fun helper(x: Int) {}
                 ("Store", Some("run")),
             ]
         );
+    }
+
+    #[test]
+    fn enum_entries_are_constants() {
+        let facts = extract_file(
+            Lang::Kotlin,
+            "enum class Policy {\n    KEEP_OPEN,\n    CLOSE { override fun x() {} },\n}\n",
+        )
+        .unwrap();
+        let got: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Policy", Kind::Class),
+                ("KEEP_OPEN", Kind::Const),
+                ("CLOSE", Kind::Const),
+                ("x", Kind::Fn),
+            ]
+        );
+    }
+
+    #[test]
+    fn calls_in_an_enum_entry_body_belong_to_its_function_not_to_the_entry() {
+        let facts = extract_file(
+            Lang::Kotlin,
+            "enum class P {\n    A(make()),\n    B { override fun x() { inner() } },\n}\n",
+        )
+        .unwrap();
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.caller.as_deref()))
+            .collect();
+        assert_eq!(calls, vec![("make", None), ("inner", Some("x"))]);
     }
 
     #[test]

@@ -10,8 +10,9 @@ use crate::model::Kind;
 
 // `class_declaration` is also a struct, an enum, an actor or an extension; they all become classes
 // except the extension, which adds no symbol (its methods are still found). A computed property
-// (`var x: Int { compute() }`) is a scope, so its calls belong to it; a stored property or a local
-// `let` is not (its `name` fn returns nothing), so those calls stay with the enclosing function.
+// (`var x: Int { compute() }`) is a function-like symbol, so its calls belong to it; a stored
+// property or a local `let` adds nothing (its `name` fn returns no name), so those calls stay with
+// the enclosing function. An `enum_entry` can list several cases (`case one, two`).
 const CONFIG: Config = Config {
     items: &[
         ("class_declaration", Kind::Class),
@@ -22,9 +23,11 @@ const CONFIG: Config = Config {
         ("init_declaration", Kind::Fn),
         ("deinit_declaration", Kind::Fn),
         ("subscript_declaration", Kind::Fn),
+        ("property_declaration", Kind::Fn),
+        ("enum_entry", Kind::Const),
     ],
     calls: &["call_expression", "constructor_expression"],
-    scopes: &["property_declaration"],
+    scopes: &[],
     name,
     callee,
     imports: |_, _, _| {},
@@ -42,6 +45,12 @@ fn name(node: Node, src: &str) -> Vec<String> {
         "subscript_declaration" => vec!["subscript".to_string()],
         "property_declaration" if node.child_by_field_name("computed_value").is_none() => {
             Vec::new()
+        }
+        "enum_entry" => {
+            let mut cursor = node.walk();
+            node.children_by_field_name("name", &mut cursor)
+                .filter_map(|n| non_empty(n, src))
+                .collect()
         }
         "class_declaration" if field_text(node, "declaration_kind", src) == Some("extension") => {
             Vec::new()
@@ -137,6 +146,7 @@ func run() { Store().add(2) }
                 ("Id", Kind::Type, 5),
                 ("Item", Kind::Class, 7),
                 ("Suit", Kind::Class, 8),
+                ("hearts", Kind::Const, 8),
                 ("Store", Kind::Class, 10),
                 ("init", Kind::Fn, 11),
                 ("add", Kind::Fn, 12),
@@ -144,7 +154,7 @@ func run() { Store().add(2) }
                 ("run", Kind::Fn, 24),
             ]
         );
-        assert_eq!(facts.symbols[7].signature, "func add(_ x: Int)");
+        assert_eq!(facts.symbols[8].signature, "func add(_ x: Int)");
     }
 
     #[test]
@@ -253,7 +263,57 @@ func run() { Store().add(2) }
             ]
         );
         let symbols: Vec<_> = facts.symbols.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(symbols, vec!["S", "f"], "properties are not symbols");
+        assert_eq!(
+            symbols,
+            vec!["S", "total", "both", "f"],
+            "computed properties are symbols, stored ones and locals are not"
+        );
+    }
+
+    #[test]
+    fn enum_cases_and_computed_properties_are_symbols_but_stored_ones_are_not() {
+        let facts = extract_file(
+            Lang::Swift,
+            "enum E {\n    case one, two(Int)\n    case three\n}\nstruct S {\n    var total: Int { compute() }\n    let stored = 1\n    func f() { let local = g() }\n}\n",
+        )
+        .unwrap();
+        let got: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("E", Kind::Class),
+                ("one", Kind::Const),
+                ("two", Kind::Const),
+                ("three", Kind::Const),
+                ("S", Kind::Class),
+                ("total", Kind::Fn),
+                ("f", Kind::Fn),
+            ]
+        );
+    }
+
+    #[test]
+    fn property_observers_and_local_computed_properties() {
+        let facts = extract_file(
+            Lang::Swift,
+            "struct S {\n    var n = 0 { didSet { changed() } }\n    func f() {\n        var v: Int { g() }\n        h()\n    }\n}\n",
+        )
+        .unwrap();
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.caller.as_deref()))
+            .collect();
+        // An observer is not a computed property: its calls stay with the enclosing scope (none).
+        // A local computed property owns its own calls; the call after it is back in `f`.
+        assert_eq!(
+            calls,
+            vec![("changed", None), ("g", Some("v")), ("h", Some("f"))]
+        );
     }
 
     #[test]
