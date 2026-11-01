@@ -49,6 +49,12 @@ pub struct Resolver {
     nominal: HashSet<String>,
 }
 
+/// The class a call returns, and the files of the functions that return it.
+struct Typed {
+    ty: String,
+    froms: Vec<String>,
+}
+
 /// Longest call chain followed; a longer one is read as a plain method call.
 const MAX_CHAIN: usize = 32;
 
@@ -107,7 +113,7 @@ impl Resolver {
     /// it can reach returns the same class, that is the receiver's type. `?` / `.unwrap()` must
     /// match a `Result`/`Option` return, and only those. A step written as a plain method call
     /// (`x.get(k)`) is never trusted: `x` may be a std type that shares the name.
-    fn hop_type(&self, from: &str, hop: &Hop, owner: Option<&str>, depth: usize) -> Option<String> {
+    fn hop_type(&self, from: &str, hop: &Hop, owner: Option<&str>, depth: usize) -> Option<Typed> {
         if depth >= MAX_CHAIN {
             return None;
         }
@@ -116,9 +122,15 @@ impl Resolver {
             Form::Method | Form::Unknown => return None,
             Form::Returned(inner) => {
                 let ty = self.hop_type(from, inner, owner, depth + 1)?;
-                members_of(defs, &ty)
+                self.members_typed(defs, &ty)
             }
-            Form::Type(ty) => members_of(defs, plain_type(ty)),
+            Form::Type(ty) => {
+                let plain = plain_type(ty);
+                self.resolve_form(from, &hop.callee, &hop.form, owner, defs, depth + 1)
+                    .into_iter()
+                    .filter(|&i| defs[i].container.as_deref() == Some(plain))
+                    .collect()
+            }
             // The wider fallback of `resolve_form` may not decide a type: keep real matches only.
             Form::SelfRef => owner.map_or_else(Vec::new, |o| members_of(defs, o)),
             Form::Bare | Form::Module(_) => self
@@ -138,7 +150,43 @@ impl Resolver {
             Some(n) => first.parts.get(n as usize)?,
             None => &first.ty,
         };
-        (!ty.is_empty()).then(|| ty.clone())
+        // The returned class is the one named in the file where the return type is written.
+        let mut froms: Vec<String> = picked.iter().map(|&i| defs[i].path.clone()).collect();
+        froms.sort();
+        froms.dedup();
+        (!ty.is_empty()).then(|| Typed {
+            ty: ty.clone(),
+            froms,
+        })
+    }
+
+    /// Members of the returned class, minus those of another type of the same name (`mpsc::Sender`
+    /// vs `oneshot::Sender`): a member goes only when it is a rival from the point of view of every
+    /// file that returns the class. Never empties the set.
+    fn members_typed(&self, defs: &[Def], typed: &Typed) -> Vec<usize> {
+        let members = members_of(defs, &typed.ty);
+        let rivals: Vec<(Vec<String>, Vec<String>)> = typed
+            .froms
+            .iter()
+            .map(|f| {
+                (
+                    self.paths.rival_files(f, &typed.ty),
+                    self.paths.rival_packages(f, &typed.ty),
+                )
+            })
+            .collect();
+        let kept: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let path = &defs[i].path;
+                let package = self.paths.package_folder_of(path);
+                !rivals.iter().all(|(files, packages)| {
+                    files.contains(path) || package.is_some_and(|p| packages.iter().any(|r| r == p))
+                })
+            })
+            .collect();
+        if kept.is_empty() { members } else { kept }
     }
 
     /// Indexes into `defs` that a call made in file `from` can reach: the best tier that has any
@@ -181,7 +229,7 @@ impl Resolver {
         let narrowed = |set: Vec<usize>| if set.is_empty() { all() } else { set };
         match form {
             Form::Returned(hop) => match self.hop_type(from, hop, owner, depth) {
-                Some(t) => match of_type(&t) {
+                Some(t) => match self.members_typed(defs, &t) {
                     members if !members.is_empty() => members,
                     // Not the trait fallback: a returned `Spawn<T>` reaches `T`'s methods by deref.
                     _ => self.resolve_form(from, name, &Form::Method, owner, defs, depth),
@@ -784,6 +832,86 @@ mod tests {
             vec![0, 1],
             "an associated type says nothing"
         );
+    }
+
+    #[test]
+    fn a_returned_class_means_the_type_of_the_file_that_returns_it() {
+        use crate::model::{Kind, Ret, Symbol};
+        let sym = |name: &str, kind: Kind, returns: Option<Ret>| Symbol {
+            name: name.into(),
+            kind,
+            line: 1,
+            signature: String::new(),
+            container: None,
+            returns,
+        };
+        let ret = Ret {
+            ty: "Sender".into(),
+            ..Default::default()
+        };
+        let r = Resolver::new(&index(vec![
+            FileEntry {
+                path: "a.rs".into(),
+                symbols: vec![
+                    sym("Sender", Kind::Struct, None),
+                    sym("channel", Kind::Fn, Some(ret)),
+                ],
+                ..Default::default()
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                symbols: vec![sym("Sender", Kind::Struct, None)],
+                ..Default::default()
+            },
+            FileEntry {
+                path: "use.rs".into(),
+                ..Default::default()
+            },
+        ]));
+        let d = vec![in_type("a.rs", 1, "Sender"), in_type("b.rs", 2, "Sender")];
+        let hop = Hop {
+            callee: "channel".into(),
+            form: Form::Bare,
+            ..Default::default()
+        };
+        let c = call(Form::Returned(Box::new(hop)), None);
+        // `channel` is defined in a.rs, whose `Sender` is the one returned: b.rs's is a rival.
+        assert_eq!(r.resolve("a.rs", &c, &d), vec![0]);
+    }
+
+    #[test]
+    fn a_member_is_dropped_only_when_it_is_a_rival_from_every_returning_file() {
+        use crate::model::{Kind, Symbol};
+        let strukt = |path: &str| FileEntry {
+            path: path.into(),
+            symbols: vec![Symbol {
+                name: "Sender".into(),
+                kind: Kind::Struct,
+                line: 1,
+                signature: String::new(),
+                container: None,
+                returns: None,
+            }],
+            ..Default::default()
+        };
+        let r = Resolver::new(&index(vec![strukt("a.rs"), strukt("b.rs"), strukt("c.rs")]));
+        let d = vec![
+            in_type("a.rs", 1, "Sender"),
+            in_type("b.rs", 2, "Sender"),
+            in_type("c.rs", 3, "Sender"),
+        ];
+        let typed = Typed {
+            ty: "Sender".into(),
+            froms: vec!["a.rs".into(), "c.rs".into()],
+        };
+        // b.rs is a rival from both returning files; a.rs and c.rs each belong to one of them.
+        assert_eq!(r.members_typed(&d, &typed), vec![0, 2]);
+        // From a file that returns nothing known, every member is a rival: the set never empties.
+        let lost = Typed {
+            ty: "Sender".into(),
+            froms: vec!["nowhere.rs".into()],
+        };
+        assert_eq!(r.members_typed(&d, &lost), vec![0, 1, 2]);
     }
 
     #[test]

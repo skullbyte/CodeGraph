@@ -119,15 +119,15 @@ impl UsePaths {
         };
         for (file, defined) in &paths.names {
             let alias = |n: &String| aliases.get(file).is_some_and(|a| a.contains(n));
-            let Some(package) = paths.package_of(file).map(|c| c.package.clone()) else {
-                continue;
-            };
+            let package = paths.package_of(file).map(|c| c.package.clone());
             for name in defined.iter().filter(|n| !alias(n)) {
                 defined_in
                     .entry(name.clone())
                     .or_default()
                     .push(file.clone());
-                homes.entry(name.clone()).or_default().push(package.clone());
+                if let Some(package) = &package {
+                    homes.entry(name.clone()).or_default().push(package.clone());
+                }
             }
         }
         homes.values_mut().for_each(|v| {
@@ -849,5 +849,14 @@ mod tests {
         ]);
         assert!(w.type_files("p/src/me.rs", "S").is_empty());
         assert!(w.rival_files("p/src/me.rs", "S").is_empty());
+    }
+
+    #[test]
+    fn files_outside_any_package_still_make_rivals() {
+        let w = paths(vec![
+            file("a.rs", &[], &[("S", Kind::Struct)]),
+            file("b.rs", &[], &[("S", Kind::Struct)]),
+        ]);
+        assert_eq!(w.rival_files("a.rs", "S"), vec!["b.rs"]);
     }
 }
