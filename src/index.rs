@@ -230,8 +230,21 @@ fn strip_trailing_commas(json: &str) -> String {
 /// Write both the JSON graph and the binary cache under `<root>/.claude/`.
 pub fn save(root: &Path, index: &Index) -> Result<()> {
     fs::create_dir_all(root.join(".claude"))?;
-    write_atomic(&graph_path(root), &serde_json::to_vec(index)?)?;
-    write_atomic(&cache_path(root), &postcard::to_stdvec(index)?)
+    // The readable JSON (the slow half: ~12 ms on tokio) and the binary cache are independent.
+    let (json, bin) = std::thread::scope(|scope| {
+        let json = scope.spawn(|| -> Result<()> {
+            write_atomic(&graph_path(root), &serde_json::to_vec(index)?)
+        });
+        let bin = postcard::to_stdvec(index)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| write_atomic(&cache_path(root), &bytes));
+        (
+            json.join()
+                .unwrap_or_else(|_| bail!("writing graph.json panicked")),
+            bin,
+        )
+    });
+    json.and(bin)
 }
 
 /// Write to a temp file, then rename: readers (and parallel hook runs) never see a half-written file.

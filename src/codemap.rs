@@ -1,7 +1,6 @@
 //! Renders the codemap.md text (same layout as the old codemap.sh).
 
 use std::collections::BTreeMap;
-use std::fmt::Write;
 
 use crate::model::Index;
 use crate::query;
@@ -17,18 +16,58 @@ pub fn render(project: &str, index: &Index) -> String {
         index.files.len(),
         folder_summary(index)
     );
+    // Plain pushes, not `write!`: tokio has ~20k lines and formatting each one cost half of `update`.
+    out.reserve(index.files.values().map(approx_len).sum());
     for entry in index.files.values() {
-        // `write!` into a String cannot fail, so the Result is ignored.
-        let _ = write!(out, "\n## {} ({} lines)\n", entry.path, entry.lines);
+        out.push_str("\n## ");
+        out.push_str(&entry.path);
+        out.push_str(" (");
+        push_number(&mut out, entry.lines);
+        out.push_str(" lines)\n");
         let imports = query::local_imports(index, entry);
         if !imports.is_empty() {
-            let _ = writeln!(out, "uses: {}", imports.join(", "));
+            out.push_str("uses: ");
+            out.push_str(&imports.join(", "));
+            out.push('\n');
         }
         for s in &entry.symbols {
-            let _ = writeln!(out, "{}:{} {}", entry.path, s.line, s.signature);
+            out.push_str(&entry.path);
+            out.push(':');
+            push_number(&mut out, s.line);
+            out.push(' ');
+            out.push_str(&s.signature);
+            out.push('\n');
         }
     }
     out
+}
+
+/// A close guess of the text one file adds, to size the buffer once.
+fn approx_len(entry: &crate::model::FileEntry) -> usize {
+    let symbols: usize = entry
+        .symbols
+        .iter()
+        .map(|s| entry.path.len() + s.signature.len() + 8)
+        .sum();
+    entry.path.len() + 24 + symbols
+}
+
+/// Append `n` in decimal without going through the formatting machinery.
+fn push_number(out: &mut String, mut n: u32) {
+    let mut digits = [0u8; 10];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    // Only ASCII digits were written, so this never fails.
+    if let Ok(text) = std::str::from_utf8(&digits[at..]) {
+        out.push_str(text);
+    }
 }
 
 /// `src(12) tests(3)`: the biggest folders first.
@@ -52,6 +91,15 @@ fn folder_summary(index: &Index) -> String {
 mod tests {
     use super::*;
     use crate::model::{FileEntry, Kind, Symbol};
+
+    #[test]
+    fn numbers_are_written_like_display_does() {
+        for n in [0, 7, 10, 99, 100, 65_535, 1_000_000, u32::MAX] {
+            let mut out = String::new();
+            push_number(&mut out, n);
+            assert_eq!(out, n.to_string());
+        }
+    }
 
     #[test]
     fn renders_like_codemap_sh() {
