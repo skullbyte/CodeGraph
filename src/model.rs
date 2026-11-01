@@ -36,6 +36,10 @@ pub struct Symbol {
     pub line: u32,
     /// Trimmed declaration line, at most 110 chars, without a trailing `{`.
     pub signature: String,
+    /// Name of the type, trait or class this is declared in (`None` for free functions and top
+    /// level items). Tells methods from functions when several definitions share a name.
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +48,30 @@ pub struct Call {
     pub line: u32,
     /// Signature of the enclosing function; `None` means top level.
     pub caller: Option<String>,
+    /// How the call is written, which says what kind of definition it can reach.
+    #[serde(default)]
+    pub form: Form,
+    /// The type, trait or class the enclosing function is declared in.
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// How a call is written. Without types, this is all the code says about where it goes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Form {
+    /// Not recorded, or a shape we do not read (macros, token scans): any definition may match.
+    #[default]
+    Unknown,
+    /// `f()`: a free function, or a method of the enclosing type in languages with an implicit `this`.
+    Bare,
+    /// `self.f()`, `this.f()`, `Self::f()`, `super.f()`: a method of the enclosing type.
+    SelfRef,
+    /// `Foo::f()`, `Foo.f()`: a member of the named type (or a free function of a module `Foo`).
+    Type(String),
+    /// `module::f()`, `pkg.f()`: a free function reached through a lowercase path (its last segment).
+    Module(String),
+    /// `value.f()`: a method of a type we cannot see.
+    Method,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

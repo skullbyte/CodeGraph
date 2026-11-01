@@ -67,6 +67,7 @@ mod tests {
                     kind: Kind::Fn,
                     line: 11,
                     signature: "pub fn parse(input: &str) -> Option<Temp>".into(),
+                    container: None,
                 }],
                 ..FileEntry::default()
             },

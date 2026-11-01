@@ -4,7 +4,7 @@
 use tree_sitter::Node;
 
 use super::{Facts, field_text, line_of, signature, text};
-use crate::model::{Call, Kind, Symbol};
+use crate::model::{Call, Form, Kind, Symbol};
 
 /// What a language contributes: which node kinds are declarations, calls and imports.
 pub struct Config {
@@ -45,6 +45,8 @@ fn visit(node: Node, src: &str, config: &Config, facts: &mut Facts, enclosing: O
             callee,
             line: line_of(node),
             caller: enclosing.map(String::from),
+            form: Form::Unknown,
+            owner: None,
         });
     }
     (config.imports)(node, src, &mut facts.imports);
@@ -71,6 +73,7 @@ fn add_item(
             kind,
             line: line_of(node),
             signature: sig.trim_end_matches([':', ';', ' ']).to_string(),
+            container: None,
         });
     }
     names.into_iter().next().filter(|_| kind == Kind::Fn)

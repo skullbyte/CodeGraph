@@ -3,7 +3,7 @@
 use tree_sitter::Node;
 
 use super::{Facts, caller_name, field_text, line_of, signature, text};
-use crate::model::{Call, Kind, Symbol};
+use crate::model::{Call, Form, Kind, Symbol};
 
 pub fn extract(root: Node, src: &str) -> Facts {
     let mut facts = Facts::default();
@@ -55,6 +55,7 @@ fn add_item(node: Node, kind: Kind, src: &str, facts: &mut Facts) -> Option<Stri
         kind,
         line: line_of(start),
         signature: sig.clone(),
+        container: None,
     });
     Some(sig)
 }
@@ -86,6 +87,7 @@ fn add_variable(node: Node, src: &str, facts: &mut Facts) -> Option<String> {
             kind,
             line: line_of(start),
             signature: sig.clone(),
+            container: None,
         });
     }
     function.map(|_| caller_name(&sig))
@@ -121,6 +123,8 @@ fn add_call(node: Node, src: &str, facts: &mut Facts, enclosing: Option<&str>) {
             callee: callee.to_string(),
             line: line_of(node),
             caller: enclosing.map(String::from),
+            form: Form::Unknown,
+            owner: None,
         });
     }
 }

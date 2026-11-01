@@ -3,33 +3,68 @@
 use tree_sitter::{Node, Parser};
 
 use super::{Facts, caller_name, field_text, line_of, signature, text};
-use crate::model::{Call, Kind, Symbol};
+use crate::model::{Call, Form, Kind, Symbol};
+
+/// Where a walk is: the innermost `fn` (the caller of what it finds), the type or trait whose
+/// method that `fn` is (the `owner` of its calls) and the type or trait that items declared here
+/// are members of (their `container`). A `fn` nested in a method has neither: it has no `self`.
+#[derive(Clone, Copy, Default)]
+struct Ctx<'a> {
+    enclosing: Option<&'a str>,
+    owner: Option<&'a str>,
+    container: Option<&'a str>,
+    /// The nearest enclosing body is an `impl` or `trait` (not a function): its `fn`s are methods.
+    in_type_body: bool,
+}
 
 pub fn extract(root: Node, src: &str) -> Facts {
     let mut facts = Facts::default();
-    visit(root, src, &mut facts, None);
+    visit(root, src, &mut facts, Ctx::default());
     facts
 }
 
-/// Depth-first walk; `enclosing` is the name of the innermost `fn` we are inside.
-fn visit(node: Node, src: &str, facts: &mut Facts, enclosing: Option<&str>) {
+/// Depth-first walk.
+fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
     let mut own = None;
+    let mut inner = ctx;
+    let impl_type = (node.kind() == "impl_item")
+        .then(|| field_text(node, "type", src).map(type_name))
+        .flatten();
     match node.kind() {
-        "function_item" => own = add_item(node, Kind::Fn, src, facts).map(|s| caller_name(&s)),
-        "struct_item" => _ = add_item(node, Kind::Struct, src, facts),
-        "enum_item" => _ = add_item(node, Kind::Enum, src, facts),
-        "trait_item" => _ = add_item(node, Kind::Trait, src, facts),
-        "type_item" => _ = add_item(node, Kind::Type, src, facts),
+        "function_item" => {
+            own = add_item(node, Kind::Fn, src, facts, ctx.container).map(|s| caller_name(&s));
+            // What is declared inside a function belongs to no type; a nested `fn` has no `self`.
+            inner.container = None;
+            if !ctx.in_type_body {
+                inner.owner = None;
+            }
+            inner.in_type_body = false;
+        }
+        "struct_item" => _ = add_item(node, Kind::Struct, src, facts, ctx.container),
+        "enum_item" => _ = add_item(node, Kind::Enum, src, facts, ctx.container),
+        "trait_item" => {
+            add_item(node, Kind::Trait, src, facts, ctx.container);
+            let name = field_text(node, "name", src);
+            (inner.owner, inner.container) = (name, name);
+            inner.in_type_body = true;
+        }
+        "type_item" => _ = add_item(node, Kind::Type, src, facts, ctx.container),
         "mod_item" => {
-            add_item(node, Kind::Mod, src, facts);
+            add_item(node, Kind::Mod, src, facts, ctx.container);
             if node.child_by_field_name("body").is_none() {
                 facts
                     .imports
                     .extend(field_text(node, "name", src).map(String::from));
             }
         }
-        "impl_item" => add_impl(node, src, facts),
-        "const_item" if is_pub(node) => _ = add_item(node, Kind::Const, src, facts),
+        "impl_item" => {
+            add_impl(node, src, facts);
+            (inner.owner, inner.container) = (impl_type, impl_type);
+            inner.in_type_body = true;
+        }
+        "const_item" if is_pub(node) => {
+            _ = add_item(node, Kind::Const, src, facts, ctx.container);
+        }
         "use_declaration" => {
             facts.imports.extend(
                 node.child_by_field_name("argument")
@@ -37,39 +72,39 @@ fn visit(node: Node, src: &str, facts: &mut Facts, enclosing: Option<&str>) {
             );
         }
         "call_expression" => {
-            let callee = node
-                .child_by_field_name("function")
-                .and_then(|f| callee_name(f, src));
-            add_call(node, callee, facts, enclosing);
+            let function = node.child_by_field_name("function");
+            let callee = function.and_then(|f| callee_name(f, src));
+            let form = function.map_or(Form::Unknown, |f| form_of(f, src));
+            add_call(node, callee, form, facts, ctx);
         }
         "macro_invocation" => {
             let callee = node
                 .child_by_field_name("macro")
                 .and_then(|f| callee_name(f, src));
-            add_call(node, callee, facts, enclosing);
+            add_call(node, callee, Form::Unknown, facts, ctx);
             let before = (facts.symbols.len(), facts.calls.len());
             if callee.is_some_and(|name| name.starts_with("cfg_")) {
-                visit_macro_items(node, src, facts, enclosing);
+                visit_macro_items(node, src, facts, ctx);
             }
             // Not items (e.g. `cfg_if!`) or not a cfg macro: scan the raw tokens instead.
             if before == (facts.symbols.len(), facts.calls.len())
                 && let Some(args) = macro_args(node)
             {
-                visit_token_calls(args, src, facts, enclosing);
+                visit_token_calls(args, src, facts, ctx);
             }
         }
         _ => {}
     }
-    let enclosing = own.as_deref().or(enclosing);
+    inner.enclosing = own.as_deref().or(ctx.enclosing);
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        visit(child, src, facts, enclosing);
+        visit(child, src, facts, inner);
     }
 }
 
 /// Macros like tokio's `cfg_net! { ... }` wrap whole items, which tree-sitter only sees as
 /// raw tokens. Re-parse the macro body as ordinary Rust and shift its line numbers back.
-fn visit_macro_items(node: Node, src: &str, facts: &mut Facts, enclosing: Option<&str>) {
+fn visit_macro_items(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
     let mut cursor = node.walk();
     let Some(body) = node
         .named_children(&mut cursor)
@@ -92,7 +127,7 @@ fn visit_macro_items(node: Node, src: &str, facts: &mut Facts, enclosing: Option
         return;
     };
     let (symbols, calls) = (facts.symbols.len(), facts.calls.len());
-    visit(tree.root_node(), inner, facts, enclosing);
+    visit(tree.root_node(), inner, facts, ctx);
     let shift = u32::try_from(body.start_position().row).unwrap_or(0);
     facts.symbols[symbols..]
         .iter_mut()
@@ -117,12 +152,12 @@ const NOT_CALLS: [&str; 15] = [
 
 /// Macro arguments are raw tokens, not a syntax tree, so look for the shapes of a call:
 /// `name (...)` is a function or method call, `name ! (...)` a nested macro call.
-fn visit_token_calls(tokens: Node, src: &str, facts: &mut Facts, enclosing: Option<&str>) {
+fn visit_token_calls(tokens: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
     let mut cursor = tokens.walk();
     let kids: Vec<Node> = tokens.children(&mut cursor).collect();
     for (i, kid) in kids.iter().enumerate() {
         if kid.kind() == "token_tree" {
-            visit_token_calls(*kid, src, facts, enclosing);
+            visit_token_calls(*kid, src, facts, ctx);
             continue;
         }
         let name = text(*kid, src);
@@ -136,13 +171,36 @@ fn visit_token_calls(tokens: Node, src: &str, facts: &mut Facts, enclosing: Opti
         let macro_next = kids.get(i + 1).is_some_and(|n| n.kind() == "!")
             && kids.get(i + 2).is_some_and(|n| n.kind() == "token_tree");
         if paren_next || macro_next {
-            add_call(*kid, Some(name), facts, enclosing);
+            let form = if macro_next {
+                Form::Unknown
+            } else {
+                token_form(&kids, i, src)
+            };
+            add_call(*kid, Some(name), form, facts, ctx);
         }
     }
 }
 
+/// The form of a call found among raw macro tokens, from the tokens just before the name:
+/// `. name` is a method (`self . name` an own method), `Foo :: name` a member of Foo.
+fn token_form(kids: &[Node], at: usize, src: &str) -> Form {
+    let before = |back: usize| at.checked_sub(back).map(|i| text(kids[i], src));
+    match before(1) {
+        Some(".") if before(2) == Some("self") => Form::SelfRef,
+        Some(".") => Form::Method,
+        Some("::") => qualified(before(2).filter(|q| !q.is_empty())),
+        _ => Form::Bare,
+    }
+}
+
 /// Record a named item; returns its signature.
-fn add_item(node: Node, kind: Kind, src: &str, facts: &mut Facts) -> Option<String> {
+fn add_item(
+    node: Node,
+    kind: Kind,
+    src: &str,
+    facts: &mut Facts,
+    container: Option<&str>,
+) -> Option<String> {
     let name = field_text(node, "name", src)?;
     let sig = signature(node, node.child_by_field_name("body"), src);
     facts.symbols.push(Symbol {
@@ -150,6 +208,7 @@ fn add_item(node: Node, kind: Kind, src: &str, facts: &mut Facts) -> Option<Stri
         kind,
         line: line_of(node),
         signature: sig.clone(),
+        container: container.map(String::from),
     });
     Some(sig)
 }
@@ -164,16 +223,85 @@ fn add_impl(node: Node, src: &str, facts: &mut Facts) {
         kind: Kind::Impl,
         line: line_of(node),
         signature: signature(node, node.child_by_field_name("body"), src),
+        container: None,
     });
 }
 
-fn add_call(node: Node, callee: Option<&str>, facts: &mut Facts, enclosing: Option<&str>) {
+fn add_call(node: Node, callee: Option<&str>, form: Form, facts: &mut Facts, ctx: Ctx) {
     if let Some(callee) = callee {
         facts.calls.push(Call {
             callee: callee.to_string(),
             line: line_of(node),
-            caller: enclosing.map(String::from),
+            caller: ctx.enclosing.map(String::from),
+            form,
+            owner: ctx.owner.map(String::from),
         });
+    }
+}
+
+/// `Foo<T>`, `&'a mut Foo`, `dyn Foo`, `a::b::Foo<T>`, `Vec::<u8>` -> `Foo`, `Foo`, `Foo`, `Foo`, `Vec`.
+fn type_name(ty: &str) -> &str {
+    let mut ty = ty.trim();
+    while let Some(rest) = ty
+        .strip_prefix('&')
+        .or_else(|| ty.strip_prefix("mut "))
+        .or_else(|| ty.strip_prefix("dyn "))
+        .or_else(|| ty.strip_prefix("impl "))
+        .or_else(|| {
+            ty.starts_with('\'')
+                .then(|| ty.split_once(char::is_whitespace).map(|(_, rest)| rest))
+                .flatten()
+        })
+    {
+        ty = rest.trim_start();
+    }
+    let ty = ty.split('<').next().unwrap_or(ty).trim_end_matches("::");
+    ty.rsplit("::").next().unwrap_or(ty).trim()
+}
+
+/// Primitive types: `u64::from(x)` is a method of a std type, not a function of a module `u64`.
+const PRIMITIVES: [&str; 17] = [
+    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32",
+    "f64", "bool", "char", "str",
+];
+
+/// `Self::f` own method, `Foo::f` member of Foo, `crate::f` / `self::f` / `super::f` a plain call,
+/// `m::f` a function of module m. A qualifier that is no plain name (`<T as Tr>`, `>` after a
+/// turbofish) or a primitive type says nothing we can use.
+fn qualified(qualifier: Option<&str>) -> Form {
+    let word = |q: &str| q.starts_with(|c: char| c.is_alphabetic() || c == '_');
+    match qualifier {
+        Some("Self") => Form::SelfRef,
+        Some("crate" | "super" | "self") => Form::Bare,
+        Some(q) if !word(q) || PRIMITIVES.contains(&q) => Form::Unknown,
+        Some(q) if q.starts_with(|c: char| c.is_uppercase()) => Form::Type(q.to_string()),
+        Some(q) => Form::Module(q.to_string()),
+        None => Form::Unknown,
+    }
+}
+
+/// How a call is written: `f()` bare, `self.f()` / `Self::f()` own method, `Foo::f()` a member of
+/// type Foo, `m::f()` a function of module m, `x.f()` a method of an unseen type.
+fn form_of(f: Node, src: &str) -> Form {
+    match f.kind() {
+        "identifier" => Form::Bare,
+        "generic_function" => f
+            .child_by_field_name("function")
+            .map_or(Form::Unknown, |inner| form_of(inner, src)),
+        "field_expression" => match f.child_by_field_name("value").map(|v| text(v, src)) {
+            Some("self") => Form::SelfRef,
+            Some(_) => Form::Method,
+            None => Form::Unknown,
+        },
+        "scoped_identifier" => {
+            let path = f.child_by_field_name("path");
+            if path.is_some_and(|p| p.kind() == "bracketed_type") {
+                return Form::Unknown; // `<T as Trait>::f`, `<Foo>::f`
+            }
+            let qualifier = path.map(|p| type_name(text(p, src)));
+            qualified(qualifier)
+        }
+        _ => Form::Unknown,
     }
 }
 
@@ -215,7 +343,7 @@ fn use_root(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::{Lang, extract as extract_file};
-    use crate::model::Kind;
+    use crate::model::{Form, Kind};
 
     const SRC: &str = "use std::fmt;
 use crate::util::helper;
@@ -263,6 +391,207 @@ fn outer() {
             ("inner", Kind::Fn, 20),
         ];
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn items_know_their_container_and_calls_know_their_form() {
+        let facts = extract_file(
+            Lang::Rust,
+            "struct Foo;\nimpl<T> Foo<T> {\n    fn a(&self) {\n        self.b();\n        Self::c();\n        Bar::d();\n        m::e();\n        x.f();\n        g();\n        Vec::<u8>::new();\n        a::b::Baz::q();\n    }\n}\ntrait Tr {\n    fn t(&self) { self.u(); }\n}\nimpl Tr for &Foo {}\nfn free() { h(); }\n",
+        )
+        .unwrap();
+        let containers: Vec<_> = facts
+            .symbols
+            .iter()
+            .filter(|s| s.kind != Kind::Impl)
+            .map(|s| (s.name.as_str(), s.container.as_deref()))
+            .collect();
+        assert_eq!(
+            containers,
+            vec![
+                ("Foo", None),
+                ("a", Some("Foo")),
+                ("Tr", None),
+                ("t", Some("Tr")),
+                ("free", None)
+            ]
+        );
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.form.clone(), c.owner.as_deref()))
+            .collect();
+        let ty = |t: &str| Form::Type(t.to_string());
+        assert_eq!(
+            calls,
+            vec![
+                ("b", Form::SelfRef, Some("Foo")),
+                ("c", Form::SelfRef, Some("Foo")),
+                ("d", ty("Bar"), Some("Foo")),
+                ("e", Form::Module("m".into()), Some("Foo")),
+                ("f", Form::Method, Some("Foo")),
+                ("g", Form::Bare, Some("Foo")),
+                ("new", ty("Vec"), Some("Foo")),
+                ("q", ty("Baz"), Some("Foo")),
+                ("u", Form::SelfRef, Some("Tr")),
+                ("h", Form::Bare, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn odd_paths_never_claim_a_module_or_a_method_they_cannot_know() {
+        let facts = extract_file(
+            Lang::Rust,
+            "fn a() {\n    self::b();\n    crate::m::c();\n    <T as Tr>::d();\n    <Foo>::e();\n    u64::from(1);\n    str::len(x);\n    super::f();\n    (self.cb)();\n}\n",
+        )
+        .unwrap();
+        let forms: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.form.clone()))
+            .collect();
+        assert_eq!(
+            forms,
+            vec![
+                ("b", Form::Bare),
+                ("c", Form::Module("m".into())),
+                ("d", Form::Unknown),
+                ("e", Form::Unknown),
+                ("from", Form::Unknown),
+                ("len", Form::Unknown),
+                ("f", Form::Bare),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_nested_fn_belongs_to_no_type_and_a_methods_own_calls_keep_theirs() {
+        let facts = extract_file(
+            Lang::Rust,
+            "impl Foo {\n    fn m(&self) {\n        fn helper() { deep(); }\n        struct Local;\n        self.own();\n    }\n}\n",
+        )
+        .unwrap();
+        let containers: Vec<_> = facts
+            .symbols
+            .iter()
+            .filter(|s| s.kind != Kind::Impl)
+            .map(|s| (s.name.as_str(), s.container.as_deref()))
+            .collect();
+        assert_eq!(
+            containers,
+            vec![("m", Some("Foo")), ("helper", None), ("Local", None)]
+        );
+        let owners: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.owner.as_deref()))
+            .collect();
+        assert_eq!(owners, vec![("deep", None), ("own", Some("Foo"))]);
+    }
+
+    #[test]
+    fn an_impl_inside_a_function_still_gives_its_methods_an_owner() {
+        let facts = extract_file(
+            Lang::Rust,
+            "fn t() {\n    impl Foo {\n        fn a(&self) { self.b(); fn inner() { deep(); } }\n    }\n    trait Tr { fn d(&self) { self.e(); } }\n    free();\n}\n",
+        )
+        .unwrap();
+        let owners: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.owner.as_deref()))
+            .collect();
+        assert_eq!(
+            owners,
+            vec![
+                ("b", Some("Foo")),
+                ("deep", None),
+                ("e", Some("Tr")),
+                ("free", None)
+            ]
+        );
+    }
+
+    #[test]
+    fn impl_targets_lose_references_lifetimes_dyn_and_generics() {
+        let facts = extract_file(
+            Lang::Rust,
+            "impl<'a> Tr for &'a mut Foo<'a> { fn a(&self) {} }\nimpl Tr for dyn Bar { fn b(&self) {} }\nimpl<T> Tr for a::Baz<T> { fn c(&self) {} }\n",
+        )
+        .unwrap();
+        let got: Vec<_> = facts
+            .symbols
+            .iter()
+            .filter(|s| s.kind == Kind::Fn)
+            .map(|s| (s.name.as_str(), s.container.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("a", Some("Foo")), ("b", Some("Bar")), ("c", Some("Baz"))]
+        );
+    }
+
+    #[test]
+    fn calls_inside_macro_arguments_read_their_form_from_the_tokens() {
+        let facts = extract_file(
+            Lang::Rust,
+            "impl Foo {\n    fn a(&self) { vec![f(), self.g(), x.h(), Bar::i(), m::j(), crate::k(), Self::l(), n!()]; }\n}\n",
+        )
+        .unwrap();
+        let forms: Vec<_> = facts
+            .calls
+            .iter()
+            .skip(1)
+            .map(|c| (c.callee.as_str(), c.form.clone()))
+            .collect();
+        assert_eq!(
+            forms,
+            vec![
+                ("f", Form::Bare),
+                ("g", Form::SelfRef),
+                ("h", Form::Method),
+                ("i", Form::Type("Bar".into())),
+                ("j", Form::Module("m".into())),
+                ("k", Form::Bare),
+                ("l", Form::SelfRef),
+                ("n", Form::Unknown),
+            ]
+        );
+        let turbofish = extract_file(Lang::Rust, "fn a() { vec![Vec::<u8>::new()]; }\n").unwrap();
+        let forms: Vec<_> = turbofish
+            .calls
+            .iter()
+            .skip(1)
+            .map(|c| (c.callee.as_str(), c.form.clone()))
+            .collect();
+        assert_eq!(
+            forms,
+            vec![("new", Form::Unknown)],
+            "`>` before `::` is no qualifier"
+        );
+    }
+
+    #[test]
+    fn macro_calls_have_no_form_but_keep_their_owner() {
+        let facts = extract_file(
+            Lang::Rust,
+            "impl Foo {\n    fn a(&self) { println!(\"x\"); vec![helper(1)]; }\n}\n",
+        )
+        .unwrap();
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.form.clone(), c.owner.as_deref()))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("println", Form::Unknown, Some("Foo")),
+                ("vec", Form::Unknown, Some("Foo")),
+                ("helper", Form::Bare, Some("Foo")),
+            ]
+        );
     }
 
     #[test]

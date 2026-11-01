@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::model::{FileEntry, Index, Resolution};
+use crate::model::{Call, FileEntry, Index, Resolution};
 use crate::scope::{Def, Resolver, Tier};
 
 /// One way of choosing among the definitions of a name, scored against SCIP.
@@ -45,14 +45,15 @@ pub struct Report {
 
 /// Picks candidate definitions (indexes into the name's definition list) for a call made in
 /// `file`. More strategies are added next to these as resolution gets smarter.
-type Strategy = fn(&Resolver, &FileEntry, &[Def]) -> Vec<usize>;
+type Strategy = fn(&Resolver, &FileEntry, &Call, &[Def]) -> Vec<usize>;
 
-const STRATEGIES: [(&str, Strategy); 5] = [
+const STRATEGIES: [(&str, Strategy); 6] = [
     ("name", name_only),
     ("same-file", same_file),
     ("imported", imported),
     ("same-folder", same_folder),
     ("scope", by_scope),
+    ("form", by_form),
 ];
 
 /// One tier alone: its definitions when it has any, else every definition (it did not apply).
@@ -65,25 +66,30 @@ fn tier_or_all(resolver: &Resolver, tier: Tier, file: &FileEntry, defs: &[Def]) 
     }
 }
 
-fn same_file(resolver: &Resolver, file: &FileEntry, defs: &[Def]) -> Vec<usize> {
+fn same_file(resolver: &Resolver, file: &FileEntry, _: &Call, defs: &[Def]) -> Vec<usize> {
     tier_or_all(resolver, Tier::SameFile, file, defs)
 }
 
-fn imported(resolver: &Resolver, file: &FileEntry, defs: &[Def]) -> Vec<usize> {
+fn imported(resolver: &Resolver, file: &FileEntry, _: &Call, defs: &[Def]) -> Vec<usize> {
     tier_or_all(resolver, Tier::Imported, file, defs)
 }
 
-fn same_folder(resolver: &Resolver, file: &FileEntry, defs: &[Def]) -> Vec<usize> {
+fn same_folder(resolver: &Resolver, file: &FileEntry, _: &Call, defs: &[Def]) -> Vec<usize> {
     tier_or_all(resolver, Tier::SameFolder, file, defs)
 }
 
 /// Today's rule: every definition of the name is a candidate.
-fn name_only(_: &Resolver, _: &FileEntry, defs: &[Def]) -> Vec<usize> {
+fn name_only(_: &Resolver, _: &FileEntry, _: &Call, defs: &[Def]) -> Vec<usize> {
     (0..defs.len()).collect()
 }
 
+/// How the call is written decides which definitions are eligible (`scope.rs`).
+fn by_form(resolver: &Resolver, file: &FileEntry, call: &Call, defs: &[Def]) -> Vec<usize> {
+    resolver.resolve(&file.path, call, defs)
+}
+
 /// Same file, else an imported file, else the same folder (`scope.rs`).
-fn by_scope(resolver: &Resolver, file: &FileEntry, defs: &[Def]) -> Vec<usize> {
+fn by_scope(resolver: &Resolver, file: &FileEntry, _: &Call, defs: &[Def]) -> Vec<usize> {
     resolver.narrow(&file.path, defs)
 }
 
@@ -92,9 +98,11 @@ fn definitions(index: &Index) -> HashMap<&str, Vec<Def>> {
     let mut map: HashMap<&str, Vec<Def>> = HashMap::new();
     for file in index.files.values() {
         for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
-            map.entry(s.name.as_str())
-                .or_default()
-                .push((file.path.clone(), s.line));
+            map.entry(s.name.as_str()).or_default().push(Def {
+                path: file.path.clone(),
+                line: s.line,
+                container: s.container.clone(),
+            });
         }
     }
     for list in map.values_mut() {
@@ -134,13 +142,20 @@ pub fn measure(index: &Index) -> Report {
             if candidates.len() < 2 {
                 continue;
             }
-            let Some(truth) = candidates.iter().position(|(p, l)| p == path && l == line) else {
+            let Some(truth) = candidates
+                .iter()
+                .position(|d| d.path == *path && d.line == *line)
+            else {
                 report.unscored += 1;
                 continue;
             };
             report.truth += 1;
             for ((_, pick), score) in STRATEGIES.iter().zip(&mut report.scores) {
-                score.add(&pick(&resolver, file, candidates), truth, candidates.len());
+                score.add(
+                    &pick(&resolver, file, call, candidates),
+                    truth,
+                    candidates.len(),
+                );
             }
         }
     }
@@ -218,7 +233,7 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Call, FileEntry, Kind, Resolution, ResolvedCall, Symbol};
+    use crate::model::{Call, FileEntry, Form, Kind, Resolution, ResolvedCall, Symbol};
 
     fn symbol(name: &str, line: u32) -> Symbol {
         Symbol {
@@ -226,6 +241,7 @@ mod tests {
             kind: Kind::Fn,
             line,
             signature: format!("fn {name}()"),
+            container: None,
         }
     }
 
@@ -234,6 +250,8 @@ mod tests {
             callee: callee.into(),
             line,
             caller: Some("main".into()),
+            form: Form::Unknown,
+            owner: None,
         }
     }
 

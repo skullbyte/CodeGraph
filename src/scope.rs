@@ -5,11 +5,17 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::model::Index;
+use crate::lang::Lang;
+use crate::model::{Call, Form, Index};
 use crate::query;
 
-/// Where a definition is: file and 1-based line.
-pub type Def = (String, u32);
+/// A project definition: file, 1-based line (as SCIP names it) and the type or trait it is in.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Def {
+    pub path: String,
+    pub line: u32,
+    pub container: Option<String>,
+}
 
 /// Where a definition sits relative to a call, best first. `SameFolder` also holds the caller's own
 /// file (a file is in its folder), so scoring it alone reads as "same file or same folder".
@@ -56,27 +62,114 @@ impl Resolver {
             .unwrap_or_else(|| (0..defs.len()).collect())
     }
 
+    /// Indexes into `defs` that `call`, made in file `from`, can reach, by how it is written:
+    /// `self.f()` goes to a method of the enclosing type, `Foo::f()` to a member of Foo,
+    /// `x.f()` to some method, `f()` to a free function. A trait's default method and an impl's
+    /// override of it are different containers and are not linked to each other (known gap). Each rule falls back to the wider set
+    /// when it would leave nothing, so a rule can only narrow, never invent.
+    pub fn resolve(&self, from: &str, call: &Call, defs: &[Def]) -> Vec<usize> {
+        let all = || (0..defs.len()).collect::<Vec<_>>();
+        let of_type = |t: &str| -> Vec<usize> {
+            (0..defs.len())
+                .filter(|&i| defs[i].container.as_deref() == Some(t))
+                .collect()
+        };
+        let narrowed = |set: Vec<usize>| if set.is_empty() { all() } else { set };
+        match &call.form {
+            Form::Unknown => all(),
+            Form::SelfRef => call
+                .owner
+                .as_deref()
+                .map_or_else(all, |o| narrowed(of_type(o))),
+            Form::Type(t) => narrowed(of_type(t)),
+            Form::Method => narrowed(
+                (0..defs.len())
+                    .filter(|&i| defs[i].container.is_some())
+                    .collect(),
+            ),
+            Form::Bare | Form::Module(_) => {
+                let mut set: Vec<usize> = (0..defs.len())
+                    .filter(|&i| defs[i].container.is_none())
+                    .collect();
+                if call.form == Form::Bare && implicit_this(from) {
+                    set.extend(call.owner.as_deref().map(of_type).unwrap_or_default());
+                    set.sort_unstable();
+                }
+                if set.is_empty() {
+                    return all();
+                }
+                // `time::advance()` lives in `time.rs` or somewhere under `time/`.
+                if let Form::Module(m) = &call.form {
+                    let named: Vec<usize> = set
+                        .iter()
+                        .copied()
+                        .filter(|&i| in_module(&defs[i].path, m))
+                        .collect();
+                    if !named.is_empty() {
+                        return named;
+                    }
+                }
+                self.narrow_among(from, defs, set)
+            }
+        }
+    }
+
+    /// `narrow`, but only among the definitions at positions `subset`.
+    fn narrow_among(&self, from: &str, defs: &[Def], subset: Vec<usize>) -> Vec<usize> {
+        let here = folder(from);
+        Tier::ALL
+            .iter()
+            .map(|&tier| {
+                subset
+                    .iter()
+                    .copied()
+                    .filter(|&i| self.is_in(tier, from, here, &defs[i].path))
+                    .collect::<Vec<_>>()
+            })
+            .find(|hits| !hits.is_empty())
+            .unwrap_or(subset)
+    }
+
+    fn is_in(&self, tier: Tier, from: &str, here: &str, path: &str) -> bool {
+        match tier {
+            Tier::SameFile => path == from,
+            Tier::Imported => self.imports.get(from).is_some_and(|set| set.contains(path)),
+            Tier::SameFolder => folder(path) == here,
+        }
+    }
+
     /// The definitions in one tier alone (empty when it has none). `from` is an index path.
     pub fn in_tier(&self, tier: Tier, from: &str, defs: &[Def]) -> Vec<usize> {
         let here = folder(from);
-        let imported = self.imports.get(from);
         (0..defs.len())
-            .filter(|&i| {
-                let path = defs[i].0.as_str();
-                match tier {
-                    Tier::SameFile => path == from,
-                    Tier::Imported => imported.is_some_and(|set| set.contains(path)),
-                    Tier::SameFolder => folder(path) == here,
-                }
-            })
+            .filter(|&i| self.is_in(tier, from, here, &defs[i].path))
             .collect()
     }
+}
+
+/// Is the code file `time.rs` / `time/mod.rs` / anything under a folder `time`? (`m` is a module
+/// name.) Docs, JSON and other non-code files are never a module.
+fn in_module(path: &str, m: &str) -> bool {
+    if matches!(Lang::from_path(path), None | Some(Lang::Markdown)) {
+        return false;
+    }
+    let (folders, file) = path.rsplit_once('/').unwrap_or(("", path));
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    stem == m || folders.split('/').any(|dir| dir == m)
+}
+
+/// Languages where a bare `f()` inside a class can mean `this.f()`.
+fn implicit_this(path: &str) -> bool {
+    matches!(
+        Lang::from_path(path),
+        Some(Lang::Kotlin | Lang::Java | Lang::CSharp | Lang::Swift | Lang::Ruby | Lang::Cpp)
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FileEntry;
+    use crate::model::{FileEntry, Form};
 
     fn file(path: &str, imports: &[&str]) -> FileEntry {
         FileEntry {
@@ -94,7 +187,32 @@ mod tests {
     }
 
     fn defs(places: &[(&str, u32)]) -> Vec<Def> {
-        places.iter().map(|(p, l)| (p.to_string(), *l)).collect()
+        places
+            .iter()
+            .map(|(p, l)| Def {
+                path: p.to_string(),
+                line: *l,
+                container: None,
+            })
+            .collect()
+    }
+
+    fn in_type(path: &str, line: u32, container: &str) -> Def {
+        Def {
+            path: path.into(),
+            line,
+            container: Some(container.into()),
+        }
+    }
+
+    fn call(form: Form, owner: Option<&str>) -> Call {
+        Call {
+            callee: "f".into(),
+            line: 1,
+            caller: Some("g".into()),
+            form,
+            owner: owner.map(String::from),
+        }
     }
 
     #[test]
@@ -194,5 +312,138 @@ mod tests {
         let d = defs(&[("b.ts", 1), ("b.ts", 1)]);
         assert_eq!(r.narrow("a.ts", &d), vec![0, 1]);
         assert!(r.narrow("a.ts", &[]).is_empty());
+    }
+
+    #[test]
+    fn self_calls_go_to_methods_of_the_enclosing_type() {
+        let r = Resolver::new(&index(vec![file("a.rs", &[])]));
+        let d = vec![
+            in_type("a.rs", 1, "A"),
+            in_type("b.rs", 2, "B"),
+            in_type("c.rs", 3, "A"),
+        ];
+        assert_eq!(
+            r.resolve("a.rs", &call(Form::SelfRef, Some("A")), &d),
+            vec![0, 2]
+        );
+        // No such method in the enclosing type (it may come from a trait): nothing is ruled out.
+        assert_eq!(
+            r.resolve("a.rs", &call(Form::SelfRef, Some("Z")), &d),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            r.resolve("a.rs", &call(Form::SelfRef, None), &d),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn type_calls_go_to_members_of_that_type() {
+        let r = Resolver::new(&index(vec![file("a.rs", &[])]));
+        let d = vec![
+            in_type("a.rs", 1, "A"),
+            in_type("b.rs", 2, "B"),
+            in_type("c.rs", 3, "B"),
+        ];
+        let b = call(Form::Type("B".into()), Some("A"));
+        assert_eq!(r.resolve("a.rs", &b, &d), vec![1, 2]);
+        let unknown = call(Form::Type("Q".into()), Some("A"));
+        assert_eq!(r.resolve("a.rs", &unknown, &d), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn value_dot_method_calls_skip_free_functions_and_ignore_the_caller_s_file() {
+        let r = Resolver::new(&index(vec![file("a.rs", &[])]));
+        let mut d = defs(&[("a.rs", 1)]);
+        d.push(in_type("a.rs", 5, "A"));
+        d.push(in_type("far/b.rs", 9, "B"));
+        assert_eq!(
+            r.resolve("a.rs", &call(Form::Method, Some("A")), &d),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn bare_and_module_calls_go_to_free_functions_best_tier_first() {
+        let r = Resolver::new(&index(vec![file("src/a.rs", &[])]));
+        let mut d = defs(&[("src/z/b.rs", 1), ("src/a.rs", 4)]);
+        d.push(in_type("src/a.rs", 7, "A"));
+        assert_eq!(
+            r.resolve("src/a.rs", &call(Form::Bare, Some("A")), &d),
+            vec![1]
+        );
+        assert_eq!(
+            r.resolve("src/a.rs", &call(Form::Module("a".into()), None), &d),
+            vec![1]
+        );
+        // Only methods exist: a free-function call has nothing to narrow to.
+        let only_methods = vec![in_type("x.rs", 1, "A"), in_type("y.rs", 2, "B")];
+        assert_eq!(
+            r.resolve("a.rs", &call(Form::Bare, None), &only_methods),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn module_calls_prefer_files_of_that_module() {
+        let r = Resolver::new(&index(vec![file("src/main.rs", &[])]));
+        let d = defs(&[
+            ("src/main.rs", 1),
+            ("src/time.rs", 2),
+            ("src/io/time/mod.rs", 3),
+            ("src/sleep.rs", 4),
+        ]);
+        let time = call(Form::Module("time".into()), None);
+        assert_eq!(r.resolve("src/main.rs", &time, &d), vec![1, 2]);
+        // A module name no file carries: the tiers decide (own file first).
+        let none = call(Form::Module("net".into()), None);
+        assert_eq!(r.resolve("src/main.rs", &none, &d), vec![0]);
+    }
+
+    #[test]
+    fn languages_with_an_implicit_this_also_let_bare_calls_reach_the_enclosing_type() {
+        let r = Resolver::new(&index(vec![file("A.kt", &[])]));
+        let d = vec![in_type("A.kt", 1, "A"), in_type("B.kt", 2, "B")];
+        assert_eq!(r.resolve("A.kt", &call(Form::Bare, Some("A")), &d), vec![0]);
+        assert_eq!(
+            r.resolve("a.rs", &call(Form::Bare, Some("A")), &d),
+            vec![0, 1],
+            "Rust has no implicit self"
+        );
+    }
+
+    #[test]
+    fn unknown_calls_are_not_narrowed() {
+        let r = Resolver::new(&index(vec![file("a.rs", &[])]));
+        let d = defs(&[("a.rs", 1), ("b.rs", 2)]);
+        assert_eq!(
+            r.resolve("a.rs", &call(Form::Unknown, None), &d),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn module_names_match_whole_stems_of_code_files_only() {
+        assert!(in_module("src/time.rs", "time"));
+        assert!(in_module("src/time/mod.rs", "time"));
+        assert!(in_module("a/time/x/y.rs", "time"));
+        assert!(!in_module("src/time.md", "time"));
+        assert!(!in_module("src/time.json", "time"));
+        assert!(!in_module("src/timer.rs", "time"));
+        assert!(!in_module("v1.2.rs", "v1"));
+        assert!(!in_module("time", "time"), "no extension: not a code file");
+    }
+
+    #[test]
+    fn bare_calls_with_an_implicit_this_keep_sorted_unique_candidates() {
+        let r = Resolver::new(&index(vec![file("A.kt", &[])]));
+        let mut d = defs(&[("A.kt", 1), ("far/free.kt", 2)]);
+        d.push(in_type("A.kt", 3, "A"));
+        d.push(in_type("B.kt", 4, "B"));
+        // Free functions (0, 1) plus the owner's methods (2); the tiers then keep the own file's.
+        assert_eq!(
+            r.resolve("A.kt", &call(Form::Bare, Some("A")), &d),
+            vec![0, 2]
+        );
     }
 }

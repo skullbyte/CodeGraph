@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use super::Facts;
-use crate::model::{Call, Kind, Symbol};
+use crate::model::{Call, Form, Kind, Symbol};
 
 /// Docs bigger than this are skipped (a generated dump would only add noise).
 const MAX_BYTES: usize = 1_000_000;
@@ -58,6 +58,7 @@ pub fn extract(src: &str) -> Facts {
                         .chars()
                         .take(110)
                         .collect(),
+                    container: None,
                 });
                 scan.inline(title, line);
                 continue;
@@ -142,6 +143,8 @@ impl Scan {
                 callee: name.to_string(),
                 line,
                 caller: self.heading.clone(),
+                form: Form::Unknown,
+                owner: None,
             });
         }
     }
