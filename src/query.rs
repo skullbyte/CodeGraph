@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::lang::Lang;
 use crate::model::{FileEntry, Index, Kind, Resolution};
+use crate::scope::{self, Resolver};
 use crate::tour::is_side_path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -90,31 +91,102 @@ pub fn def(index: &Index, name: &str) -> Vec<DefHit> {
 
 /// Every call site of `name`, with the function it sits in.
 pub fn callers(index: &Index, name: &str) -> Vec<CallerHit> {
-    let mut hits: Vec<CallerHit> = index
+    let mut hits: Vec<CallerHit> = call_sites(index, name)
+        .into_iter()
+        .map(|(hit, _)| hit)
+        .collect();
+    hits.extend(doc_mentions(index, name));
+    hits
+}
+
+/// A call site, and the indexes (into the name's definitions) it can reach; empty = not narrowed.
+type Site = (CallerHit, Vec<usize>);
+
+/// Every call site of `name` with what it can reach. With several definitions each hit says
+/// which one it calls when that is certain (SCIP's answer, else the form resolver's).
+fn call_sites(index: &Index, name: &str) -> Vec<Site> {
+    let defs = scope::definitions_of(index, name);
+    // The resolver reads every import: build it only when there is something to tell apart.
+    let resolver = (defs.len() >= 2).then(|| Resolver::new(index));
+    let mut sites: Vec<Site> = index
         .files
         .values()
         .flat_map(|f| {
+            let (defs, resolver) = (&defs, &resolver);
             f.graph_calls()
                 .filter(move |(c, _)| c.callee == name)
-                .map(|(c, target)| CallerHit {
-                    path: f.path.clone(),
-                    line: c.line,
-                    caller: c.caller.clone(),
-                    target: match target {
-                        Some(Resolution::Def { path, line }) => Some(format!("{path}:{line}")),
+                .map(move |(c, scip)| {
+                    let reach = resolver
+                        .as_ref()
+                        .map(|r| r.candidates(&f.path, c, scip, defs))
+                        .unwrap_or_default();
+                    let target = match (scip, &reach[..]) {
+                        (Some(Resolution::Def { path, line }), _) => Some(format!("{path}:{line}")),
+                        (_, [one]) => Some(format!("{}:{}", defs[*one].path, defs[*one].line)),
                         _ => None,
-                    },
-                    doc: false,
+                    };
+                    let hit = CallerHit {
+                        path: f.path.clone(),
+                        line: c.line,
+                        caller: c.caller.clone(),
+                        target,
+                        doc: false,
+                    };
+                    (hit, reach)
                 })
         })
         .collect();
     // With one definition there is nothing to tell apart; with several, say which each hit calls.
-    let definitions: BTreeSet<_> = hits.iter().filter_map(|h| h.target.as_deref()).collect();
-    if definitions.len() < 2 {
-        hits.iter_mut().for_each(|h| h.target = None);
+    let distinct: BTreeSet<_> = sites.iter().filter_map(|(h, _)| h.target.clone()).collect();
+    if distinct.len() < 2 {
+        sites.iter_mut().for_each(|(h, _)| h.target = None);
     }
-    hits.extend(doc_mentions(index, name));
-    hits
+    sites
+}
+
+/// The definition of `name` that `selector` (`PATH` or `PATH:LINE`) names, or an error that lists
+/// the choices.
+pub fn select_def(index: &Index, name: &str, selector: &str) -> Result<scope::Def, String> {
+    let defs = scope::definitions_of(index, name);
+    let selector = selector.strip_prefix("./").unwrap_or(selector);
+    let (path, line) = match selector.rsplit_once(':') {
+        Some((p, l)) if l.parse::<u32>().is_ok() => (p, l.parse::<u32>().ok()),
+        _ => (selector, None),
+    };
+    let mut found = defs
+        .iter()
+        .filter(|d| d.path == path && line.is_none_or(|l| d.line == l));
+    match (found.next(), found.next()) {
+        (Some(d), None) => Ok(d.clone()),
+        _ => {
+            let choices: Vec<_> = defs
+                .iter()
+                .map(|d| format!("{}:{}", d.path, d.line))
+                .collect();
+            Err(format!(
+                "--def {selector} does not pick one definition of {name}; use one of: {}",
+                if choices.is_empty() {
+                    "(none)".into()
+                } else {
+                    choices.join(", ")
+                }
+            ))
+        }
+    }
+}
+
+/// Call sites that can reach `only`: those pinned to it and those that could be any definition.
+/// Sites pinned to another definition are left out.
+pub fn callers_of(index: &Index, name: &str, only: &scope::Def) -> Vec<CallerHit> {
+    let defs = scope::definitions_of(index, name);
+    let Some(at) = defs.iter().position(|d| d == only) else {
+        return Vec::new();
+    };
+    call_sites(index, name)
+        .into_iter()
+        .filter(|(_, reach)| reach.is_empty() || reach.contains(&at))
+        .map(|(hit, _)| hit)
+        .collect()
 }
 
 /// Where docs mention `name` in `code`, listed only when the code defines it exactly once
@@ -764,6 +836,37 @@ pub fn explain(index: &Index, name: &str) -> Explain {
     }
 }
 
+/// `explain` for one definition: its own callers (see `callers_of`) and the calls made by its
+/// body, found by file and owner type.
+pub fn explain_of(index: &Index, name: &str, only: &scope::Def) -> Explain {
+    let locs = locations(index);
+    let mut incoming: BTreeMap<String, usize> = BTreeMap::new();
+    for hit in callers_of(index, name, only) {
+        if let Some(caller) = hit.caller.as_deref().map(bare_name) {
+            *incoming.entry(caller).or_default() += 1;
+        }
+    }
+    let mut outgoing: BTreeMap<String, usize> = BTreeMap::new();
+    if let Some(file) = index.files.get(&only.path) {
+        for (call, _) in file.graph_calls() {
+            let mine = call.caller.as_deref().map(bare_name).as_deref() == Some(name)
+                && call.owner == only.container;
+            if mine {
+                *outgoing.entry(call.callee.clone()).or_default() += 1;
+            }
+        }
+    }
+    let defs = def(index, name)
+        .into_iter()
+        .filter(|d| d.path == only.path && d.line == only.line)
+        .collect();
+    Explain {
+        defs,
+        incoming: links(incoming, &locs),
+        outgoing: links(outgoing, &locs),
+    }
+}
+
 /// Everything that depends on `name`: its callers, their callers, and so on, nearest first.
 /// `max_depth` limits how far to walk.
 pub fn affected(index: &Index, name: &str, max_depth: Option<usize>) -> Vec<Affected> {
@@ -1015,6 +1118,85 @@ mod tests {
         )]);
         let got: Vec<_> = callers(&index, "a").iter().map(CallerHit::text).collect();
         assert_eq!(got, vec!["a.rs:3  in fn b", "a.rs:5  in fn c"]);
+    }
+
+    #[test]
+    fn callers_say_which_definition_a_typed_call_reaches() {
+        let index = index_of(&[(
+            "a.rs",
+            "struct A;\nstruct B;\nimpl A { fn new() {} }\nimpl B { fn new() {} }\n\
+             fn one() { A::new(); }\nfn two() { B::new(); }\nfn three() { x.new(); }\n",
+        )]);
+        let got: Vec<_> = callers(&index, "new").iter().map(CallerHit::text).collect();
+        assert_eq!(
+            got,
+            vec![
+                "a.rs:5  in fn one  -> a.rs:3",
+                "a.rs:6  in fn two  -> a.rs:4",
+                "a.rs:7  in fn three",
+            ]
+        );
+    }
+
+    const TWO_NEWS: &str = "struct A;\nstruct B;\nimpl A { fn new() {} }\nimpl B { fn new() {} }\n\
+         fn one() { A::new(); }\nfn two() { B::new(); }\nfn three() { x.new(); }\n";
+
+    #[test]
+    fn a_def_selector_names_one_definition_or_lists_the_choices() {
+        let index = index_of(&[("a.rs", TWO_NEWS)]);
+        assert_eq!(select_def(&index, "new", "a.rs:4").unwrap().line, 4);
+        let err = select_def(&index, "new", "a.rs").unwrap_err();
+        assert!(err.contains("a.rs:3") && err.contains("a.rs:4"), "{err}");
+        assert!(select_def(&index, "new", "a.rs:9").is_err());
+        assert!(select_def(&index, "new", "b.rs").is_err());
+        assert!(select_def(&index, "nothing", "a.rs").is_err());
+    }
+
+    #[test]
+    fn callers_of_one_definition_keep_its_sites_and_the_unsure_ones() {
+        let index = index_of(&[("a.rs", TWO_NEWS)]);
+        let only = select_def(&index, "new", "a.rs:3").unwrap();
+        let got: Vec<_> = callers_of(&index, "new", &only)
+            .iter()
+            .map(CallerHit::text)
+            .collect();
+        // `B::new()` is pinned to the other definition and goes; `x.new()` could be either.
+        assert_eq!(
+            got,
+            vec!["a.rs:5  in fn one  -> a.rs:3", "a.rs:7  in fn three"]
+        );
+    }
+
+    #[test]
+    fn explain_of_one_definition_reads_the_body_of_that_owner_only() {
+        let index = index_of(&[(
+            "a.rs",
+            "struct A;\nstruct B;\nimpl A { fn run(&self) { one(); } }\n\
+             impl B { fn run(&self) { two(); } }\nfn one() {}\nfn two() {}\n",
+        )]);
+        let only = select_def(&index, "run", "a.rs:3").unwrap();
+        let out: Vec<_> = explain_of(&index, "run", &only)
+            .outgoing
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(out, vec!["one"]);
+    }
+
+    #[test]
+    fn a_def_selector_accepts_a_leading_dot_slash() {
+        let index = index_of(&[("a.rs", TWO_NEWS)]);
+        assert_eq!(select_def(&index, "new", "./a.rs:3").unwrap().line, 3);
+    }
+
+    #[test]
+    fn explain_of_one_definition_counts_only_its_callers() {
+        let index = index_of(&[("a.rs", TWO_NEWS)]);
+        let only = select_def(&index, "new", "a.rs:4").unwrap();
+        let e = explain_of(&index, "new", &only);
+        assert_eq!(e.defs.len(), 1);
+        let who: Vec<_> = e.incoming.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(who, vec!["three", "two"]);
     }
 
     #[test]
@@ -1382,7 +1564,8 @@ mod tests {
             vec![
                 "a.rs:2  in fn run  -> a.rs:1",
                 "b.rs:2  in fn go  -> b.rs:1",
-                "b.rs:3  in fn plain",
+                // No SCIP answer: the resolver pins a bare call to the definition in its own file.
+                "b.rs:3  in fn plain  -> b.rs:1",
             ]
         );
         // One definition among the hits: nothing to disambiguate, no arrow.

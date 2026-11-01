@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::model::{Call, FileEntry, Form, Index, Resolution};
-use crate::scope::{Def, Resolver, Tier};
+use crate::scope::{self, Def, Resolver, Tier};
 
 /// One way of choosing among the definitions of a name, scored against SCIP.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -100,12 +100,9 @@ fn definitions(index: &Index) -> HashMap<&str, Vec<Def>> {
     let mut map: HashMap<&str, Vec<Def>> = HashMap::new();
     for file in index.files.values() {
         for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
-            map.entry(s.name.as_str()).or_default().push(Def {
-                path: file.path.clone(),
-                line: s.line,
-                container: s.container.clone(),
-                returns: s.returns.clone(),
-            });
+            map.entry(s.name.as_str())
+                .or_default()
+                .push(scope::def_of(file, s));
         }
     }
     for list in map.values_mut() {

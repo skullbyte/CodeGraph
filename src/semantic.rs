@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::index;
 use crate::model::Index;
 use crate::query::{self, CallerHit, DefHit, Explain};
+use crate::scope;
 use crate::walk;
 
 /// Inline (the main agent reads the docs) up to this many pending lines; above it, subagents.
@@ -451,6 +452,36 @@ pub fn callers_with(index: &Index, store: &Store, name: &str) -> Vec<CallerHit> 
     hits
 }
 
+/// `callers_with` limited to the definition `selector` (`PATH[:LINE]`) names. Doc mentions and
+/// links are kept only when the name has one definition: with several they could mean any.
+pub fn callers_for(
+    index: &Index,
+    store: &Store,
+    name: &str,
+    selector: &str,
+) -> Result<Vec<CallerHit>, String> {
+    let only = query::select_def(index, name, selector)?;
+    if scope::definitions_of(index, name).len() < 2 {
+        return Ok(callers_with(index, store, name));
+    }
+    Ok(query::callers_of(index, name, &only))
+}
+
+/// `explain_with` limited to the definition `selector` names; with several definitions the doc
+/// links and concepts are left out, as in `callers_for`.
+pub fn explain_for(
+    index: &Index,
+    store: &Store,
+    name: &str,
+    selector: &str,
+) -> Result<Explain, String> {
+    let only = query::select_def(index, name, selector)?;
+    if scope::definitions_of(index, name).len() < 2 {
+        return Ok(explain_with(index, store, name));
+    }
+    Ok(query::explain_of(index, name, &only))
+}
+
 /// `explain` with concepts among the definitions and doc links among the incoming links.
 pub fn explain_with(index: &Index, store: &Store, name: &str) -> Explain {
     let mut explained = query::explain(index, name);
@@ -746,6 +777,24 @@ mod tests {
             },
         );
         store
+    }
+
+    #[test]
+    fn def_selector_keeps_doc_links_only_for_a_single_definition() {
+        let dir = project();
+        let idx = built(dir.path());
+        let store = store_with("docs/a.md", "rate limiting", "explain", "INFERRED");
+        let at = query::def(&idx, "explain")[0].clone();
+        let sel = format!("{}:{}", at.path, at.line);
+        assert_eq!(
+            callers_for(&idx, &store, "explain", &sel).unwrap(),
+            callers_with(&idx, &store, "explain")
+        );
+        assert_eq!(
+            explain_for(&idx, &store, "explain", &sel).unwrap(),
+            explain_with(&idx, &store, "explain")
+        );
+        assert!(callers_for(&idx, &store, "explain", "nowhere.rs").is_err());
     }
 
     #[test]

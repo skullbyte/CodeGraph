@@ -66,6 +66,19 @@ fn def_and_callers_print_one_result_per_line() {
 }
 
 #[test]
+fn def_flag_picks_one_definition_or_fails_with_the_choices() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let ok = run(dir.path(), &["callers", "alpha", "--def", "src/lib.rs:1"]);
+    assert_eq!(stdout(&ok), "src/lib.rs:3  in pub fn beta\n");
+    let explained = run(dir.path(), &["explain", "alpha", "--def", "src/lib.rs"]);
+    assert!(stdout(&explained).contains("<- beta"));
+    let bad = run(dir.path(), &["callers", "alpha", "--def", "nowhere.rs"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("src/lib.rs:1"));
+}
+
+#[test]
 fn json_flag_prints_json() {
     let dir = project();
     run(dir.path(), &["index"]);

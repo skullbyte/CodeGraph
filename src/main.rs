@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
@@ -67,7 +67,12 @@ enum Command {
         teach: bool,
     },
     /// Who calls <name>?
-    Callers { name: String },
+    Callers {
+        name: String,
+        /// Only calls that can reach this definition: PATH or PATH:LINE (see `def <name>`).
+        #[arg(long)]
+        def: Option<String>,
+    },
     /// Shortest call chain (function names) or import chain (file paths) from A to B.
     Path { from: String, to: String },
     /// Re-index one file.
@@ -81,6 +86,9 @@ enum Command {
         /// How much to print: brief (default), full, callers, callees or defs (--json is always full).
         #[arg(long, default_value = "brief")]
         mode: query::Mode,
+        /// Only this definition: PATH or PATH:LINE (see `def <name>`).
+        #[arg(long)]
+        def: Option<String>,
     },
     /// Everything that depends on <name>: its callers, their callers, and so on.
     Affected {
@@ -270,11 +278,16 @@ fn run(cli: Cli) -> Result<()> {
             }
             print_results(&hits, cli.json, DefHit::text)
         }
-        Command::Callers { name } => print_results(
-            &semantic::callers_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name),
-            cli.json,
-            CallerHit::text,
-        ),
+        Command::Callers { name, def } => {
+            let (index, store) = (load(&cli.dir)?, semantic::load_store(&cli.dir)?);
+            let hits = match def {
+                Some(sel) => {
+                    semantic::callers_for(&index, &store, name, sel).map_err(|e| anyhow!(e))?
+                }
+                None => semantic::callers_with(&index, &store, name),
+            };
+            print_results(&hits, cli.json, CallerHit::text)
+        }
         Command::Path { from, to } => {
             let hops = query::path(&load(&cli.dir)?, from, to);
             if hops.is_empty() && !cli.json {
@@ -284,9 +297,20 @@ fn run(cli: Cli) -> Result<()> {
             print_results(&hops, cli.json, Hop::text)
         }
         Command::Update { file } => cmd_update(&cli.dir, file),
-        Command::Explain { name, teach, mode } => {
-            let explained =
-                semantic::explain_with(&load(&cli.dir)?, &semantic::load_store(&cli.dir)?, name);
+        Command::Explain {
+            name,
+            teach,
+            mode,
+            def,
+        } => {
+            let index = load(&cli.dir)?;
+            let explained = match def {
+                Some(sel) => {
+                    semantic::explain_for(&index, &semantic::load_store(&cli.dir)?, name, sel)
+                        .map_err(|e| anyhow!(e))?
+                }
+                None => semantic::explain_with(&index, &semantic::load_store(&cli.dir)?, name),
+            };
             if cli.json {
                 println!("{}", serde_json::to_string(&explained)?);
             } else {

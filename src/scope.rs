@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::lang::Lang;
-use crate::model::{Call, Form, Hop, Index, Kind, Ret};
+use crate::model::{Call, FileEntry, Form, Hop, Index, Kind, Resolution, Ret, Symbol};
 use crate::query;
 use crate::usepath::{UsePaths, plain_type};
 
@@ -63,6 +63,34 @@ fn members_of(defs: &[Def], ty: &str) -> Vec<usize> {
     (0..defs.len())
         .filter(|&i| defs[i].container.as_deref() == Some(ty))
         .collect()
+}
+
+/// The definition a symbol of `file` stands for.
+pub fn def_of(file: &FileEntry, s: &Symbol) -> Def {
+    Def {
+        path: file.path.clone(),
+        line: s.line,
+        container: s.container.clone(),
+        returns: s.returns.clone(),
+    }
+}
+
+/// Every project definition of `name` (`impl` blocks and doc headings do not count), sorted;
+/// two symbols on one line (generated code) are one definition.
+pub fn definitions_of(index: &Index, name: &str) -> Vec<Def> {
+    let mut defs: Vec<Def> = index
+        .files
+        .values()
+        .flat_map(|f| {
+            f.symbols
+                .iter()
+                .filter(|s| s.kind.is_code_def() && s.name == name)
+                .map(move |s| def_of(f, s))
+        })
+        .collect();
+    defs.sort();
+    defs.dedup();
+    defs
 }
 
 /// Folder of an index path; `""` for a file at the project root.
@@ -213,6 +241,22 @@ impl Resolver {
             defs,
             0,
         )
+    }
+
+    /// The same, but SCIP's answer wins when it names one of `defs`.
+    pub fn candidates(
+        &self,
+        from: &str,
+        call: &Call,
+        scip: Option<&Resolution>,
+        defs: &[Def],
+    ) -> Vec<usize> {
+        if let Some(Resolution::Def { path, line }) = scip
+            && let Some(at) = defs.iter().position(|d| d.path == *path && d.line == *line)
+        {
+            return vec![at];
+        }
+        self.resolve(from, call, defs)
     }
 
     fn resolve_form(
@@ -1093,6 +1137,34 @@ mod tests {
 
     fn chained(form: Form) -> Call {
         call(form, None)
+    }
+
+    #[test]
+    fn scip_wins_over_the_form_when_it_names_a_known_definition() {
+        let r = resolver_with(&[("f", Some("A"), None), ("f", Some("B"), None)]);
+        let defs = vec![
+            Def {
+                path: "src/a.rs".into(),
+                line: 1,
+                container: Some("A".into()),
+                returns: None,
+            },
+            Def {
+                path: "src/a.rs".into(),
+                line: 2,
+                container: Some("B".into()),
+                returns: None,
+            },
+        ];
+        let c = call(Form::Type("A".into()), None);
+        let at = |line| Resolution::Def {
+            path: "src/a.rs".into(),
+            line,
+        };
+        assert_eq!(r.candidates("src/a.rs", &c, Some(&at(2)), &defs), vec![1]);
+        // SCIP names something we do not list: the form decides.
+        assert_eq!(r.candidates("src/a.rs", &c, Some(&at(9)), &defs), vec![0]);
+        assert_eq!(r.candidates("src/a.rs", &c, None, &defs), vec![0]);
     }
 
     #[test]

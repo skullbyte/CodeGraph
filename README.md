@@ -10,7 +10,7 @@ codegraph index [dir]        # writes .claude/codemap.md and .claude/graph.json 
 codegraph query "<question>" # plain English: matching symbols + what they call / are called by (--depth, --budget tokens, --dfs)
 codegraph tour               # reading order: entry files, then the key file of each cluster (--top N)
 codegraph def <name>         # path:line signature (--teach adds what the keywords mean + the doc comment)
-codegraph callers <name>     # path:line  in <enclosing fn>
+codegraph callers <name>     # path:line  in <enclosing fn>, -> def when known (--def PATH[:LINE]: one definition only), with -> def when known (--def PATH[:LINE]: one definition only)
 codegraph path <A> <B>       # shortest call chain (function names) or import chain (file paths)
 codegraph update <file>      # re-index one file
 codegraph explain <name>     # definition + callers + callees (--teach: plain-language lines + what to read next)

@@ -139,16 +139,20 @@ impl Server {
                 &semantic::def_with(index, &store, text(args, "name")?),
                 flag(args, "teach"),
             ),
-            "callers" => semantic::callers_with(index, &store, text(args, "name")?)
-                .iter()
-                .map(query::CallerHit::text)
-                .collect(),
-            "explain" => glossary::explain_lines(
-                &root,
-                &semantic::explain_with(index, &store, text(args, "name")?),
-                flag(args, "teach"),
-                mode(args)?,
-            ),
+            "callers" => match optional_text(args, "def")? {
+                Some(sel) => semantic::callers_for(index, &store, text(args, "name")?, sel)?,
+                None => semantic::callers_with(index, &store, text(args, "name")?),
+            }
+            .iter()
+            .map(query::CallerHit::text)
+            .collect(),
+            "explain" => {
+                let explained = match optional_text(args, "def")? {
+                    Some(sel) => semantic::explain_for(index, &store, text(args, "name")?, sel)?,
+                    None => semantic::explain_with(index, &store, text(args, "name")?),
+                };
+                glossary::explain_lines(&root, &explained, flag(args, "teach"), mode(args)?)
+            }
             "path" => query::path(index, text(args, "from")?, text(args, "to")?)
                 .iter()
                 .map(query::Hop::text)
@@ -287,8 +291,8 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "callers",
-            "Call sites of a function: path:line and calling function.",
-            with(&name),
+            "Call sites of a function: path:line and calling function. def=PATH[:LINE] keeps only calls that can reach that definition.",
+            with(&json!({ "name": name["name"], "def": { "type": "string" } })),
             &["name"],
         ),
         tool(
@@ -297,6 +301,7 @@ fn tools() -> Vec<Value> {
             with(&json!({
                 "name": name["name"],
                 "teach": { "type": "boolean" },
+                "def": { "type": "string", "description": "PATH[:LINE]: only this definition" },
                 "mode": { "type": "string", "enum": ["brief", "full", "callers", "callees", "defs"] }
             })),
             &["name"],
@@ -361,6 +366,14 @@ fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
             "argument `{key}` must be 1-{MAX_ARG_LEN} characters"
         )),
         None => Err(format!("missing string argument `{key}`")),
+    }
+}
+
+/// A string argument that may be absent (or null); present, it follows the rules of `text`.
+fn optional_text<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => text(args, key).map(Some),
     }
 }
 
@@ -621,6 +634,35 @@ mod tests {
         );
         assert!(bad.1 && bad.0.contains("unknown mode"), "{bad:?}");
         let not_text = by(&mut server, json!({ "name": "alpha", "mode": 3 }));
+        assert!(not_text.1);
+    }
+
+    #[test]
+    fn callers_and_explain_take_an_optional_def() {
+        let dir = project();
+        let mut server = Server::new(dir.path());
+        let ok = call(
+            &mut server,
+            "callers",
+            json!({ "name": "alpha", "def": "src/lib.rs:1" }),
+        );
+        assert_eq!(ok, ("src/lib.rs:3  in pub fn beta".into(), false));
+        let explained = call(
+            &mut server,
+            "explain",
+            json!({ "name": "alpha", "def": "src/lib.rs" }),
+        );
+        assert!(
+            !explained.1 && explained.0.contains("<- beta"),
+            "{explained:?}"
+        );
+        let bad = call(
+            &mut server,
+            "callers",
+            json!({ "name": "alpha", "def": "nowhere.rs" }),
+        );
+        assert!(bad.1 && bad.0.contains("src/lib.rs:1"), "{bad:?}");
+        let not_text = call(&mut server, "callers", json!({ "name": "alpha", "def": 3 }));
         assert!(not_text.1);
     }
 
