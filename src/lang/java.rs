@@ -2,7 +2,7 @@
 
 use tree_sitter::Node;
 
-use super::generic::{Config, name_field, non_empty};
+use super::generic::{Config, name_field, no_form, non_empty};
 use super::{Facts, text};
 use crate::model::Kind;
 
@@ -23,6 +23,8 @@ const CONFIG: Config = Config {
         "method_reference",
     ],
     scopes: &[],
+    containers: &[],
+    form: no_form,
     name: name_field,
     callee,
     imports,

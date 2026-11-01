@@ -2,7 +2,7 @@
 
 use tree_sitter::Node;
 
-use super::generic::{Config, name_field, non_empty};
+use super::generic::{Config, name_field, no_form, non_empty};
 use super::{Facts, text};
 use crate::model::Kind;
 
@@ -24,6 +24,8 @@ const CONFIG: Config = Config {
     calls: &["invocation_expression", "object_creation_expression"],
     // A property or indexer is not listed, but the calls in its accessors belong to it.
     scopes: &["property_declaration", "indexer_declaration"],
+    containers: &[],
+    form: no_form,
     name,
     callee,
     imports: |_, _, _| {},

@@ -5,7 +5,7 @@
 use tree_sitter::Node;
 
 use super::Facts;
-use super::generic::{Config, non_empty};
+use super::generic::{Config, no_form, non_empty};
 use crate::model::Kind;
 
 const CONFIG: Config = Config {
@@ -17,6 +17,8 @@ const CONFIG: Config = Config {
     ],
     calls: &["call"],
     scopes: &[],
+    containers: &[],
+    form: no_form,
     name,
     callee,
     imports: |_, _, _| {},
