@@ -287,21 +287,57 @@ fn returns_of(func: Node, src: &str, container: Option<&str>) -> Option<Ret> {
     };
     let path = type_path(written);
     let last = path.rsplit("::").next().unwrap_or(path);
-    if matches!(last, "Result" | "Option") {
-        let inner = first_generic_arg(written)?;
-        let ty = known_type(inner, &generics, container)?;
-        return Some(Ret {
-            ty,
-            fallible: true,
+    let (shown, fallible) = if matches!(last, "Result" | "Option") {
+        (first_generic_arg(written)?, true)
+    } else {
+        (written, false)
+    };
+    if let Some(elements) = tuple_elements(shown) {
+        // `(Sender<T>, Receiver<T>)`: the class of each element, `""` where it is not a plain class.
+        let parts: Vec<String> = elements
+            .iter()
+            .map(|e| known_type(e, &generics, container).unwrap_or_default())
+            .collect();
+        return parts.iter().any(|p| !p.is_empty()).then_some(Ret {
+            parts,
+            fallible,
             future,
+            ..Default::default()
         });
     }
-    let ty = known_type(written, &generics, container)?;
+    let ty = known_type(shown, &generics, container)?;
     Some(Ret {
         ty,
-        fallible: false,
+        fallible,
         future,
+        ..Default::default()
     })
+}
+
+/// `(A, B<C, D>, (E, F))` -> `["A", "B<C, D>", "(E, F)"]`; anything that is not a tuple of two or
+/// more elements gives `None`.
+fn tuple_elements(ty: &str) -> Option<Vec<&str>> {
+    let inner = ty.trim().strip_prefix('(')?.strip_suffix(')')?;
+    let (mut parts, mut depth, mut start, mut prev) = (Vec::new(), 0i32, 0, ' ');
+    for (i, c) in inner.char_indices() {
+        let arrow = prev == '-' && c == '>'; // the `->` of a function type is not a bracket
+        prev = c;
+        match c {
+            _ if arrow => {}
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(inner[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = inner[start..].trim();
+    if !last.is_empty() {
+        parts.push(last);
+    }
+    (depth == 0 && parts.len() >= 2).then_some(parts)
 }
 
 /// `io::Result<Foo>` -> `Foo`, `Result<Foo, E>` -> `Foo`, `Option<Vec<u8>>` -> `Vec<u8>`.
@@ -484,6 +520,7 @@ fn hop_of(expr: Node, src: &str, ctx: Ctx, depth: usize) -> Option<Hop> {
                 form: form_of(function, src, ctx, depth + 1),
                 unwrapped: false,
                 awaited: false,
+                part: None,
             })
         }
         _ => None,
@@ -628,7 +665,50 @@ fn local_types(func: Node, src: &str, owner: Option<&str>, fields: Option<&Field
                         .map(Known::Class)
                         .or_else(|| hop_of(value, src, chain_ctx, 0).map(Known::Chain))
                 });
-                if let Some(p) = pattern {
+                if let Some(p) = pattern.filter(|p| p.kind() == "tuple_pattern") {
+                    // `let (a, b) = call()`: each plain name is one element of the returned tuple.
+                    let hop = n
+                        .child_by_field_name("value")
+                        .and_then(|v| hop_of(v, src, chain_ctx, 0));
+                    let mut hop_rest = false;
+                    let mut cursor = p.walk();
+                    let elements = p.children(&mut cursor).filter(|c| {
+                        !matches!(c.kind(), "(" | ")" | "," | "line_comment" | "block_comment")
+                    });
+                    // A type annotation is authoritative and not read here: names stay unknown.
+                    let hop = hop.filter(|_| n.child_by_field_name("type").is_none());
+                    for (i, element) in elements.enumerate() {
+                        if text(element, src) == ".." {
+                            // Later elements are counted from the end: their index is unknown.
+                            hop_rest = true;
+                        }
+                        let hop = if hop_rest { &None } else { &hop };
+                        let plain = match element.kind() {
+                            "mut_pattern" => {
+                                let mut inner = element.walk();
+                                element
+                                    .named_children(&mut inner)
+                                    .find(|c| c.kind() == "identifier")
+                            }
+                            _ => Some(element),
+                        }
+                        .filter(|e| e.kind() == "identifier");
+                        match (plain, hop) {
+                            (Some(e), Some(h)) => declare(
+                                text(e, src).to_string(),
+                                Some(Known::Chain(Hop {
+                                    part: Some(i as u32),
+                                    ..h.clone()
+                                })),
+                            ),
+                            _ => {
+                                let mut names = Vec::new();
+                                pattern_names(element, src, &mut names);
+                                names.into_iter().for_each(|name| declare(name, None));
+                            }
+                        }
+                    }
+                } else if let Some(p) = pattern {
                     let mut names = Vec::new();
                     pattern_names(p, src, &mut names);
                     let single = p.kind() == "identifier";
@@ -1355,6 +1435,7 @@ impl<T> W<T> {
             form,
             unwrapped,
             awaited: false,
+            ..Default::default()
         }))
     }
 
@@ -1385,6 +1466,7 @@ fn nothing() {}
                 ty: ty.into(),
                 fallible,
                 future: false,
+                ..Default::default()
             })
         };
         assert_eq!(ret("new"), r("Builder", false));
@@ -1484,6 +1566,7 @@ async fn go() {
             form: Form::Type("Stream".into()),
             unwrapped: true,
             awaited: true,
+            ..Default::default()
         }));
         let got = forms_of(src, &["peer", "split"]);
         assert_eq!(
@@ -1611,5 +1694,132 @@ fn free() {
                 Form::Method,
             ]
         );
+    }
+
+    #[test]
+    fn tuple_returns_and_destructuring_lets() {
+        let src = "fn channel<T>() -> (Sender<T>, Receiver<T>) { todo!() }
+fn open() -> io::Result<(Reader, u32)> { todo!() }
+fn trio() -> (A, (B, C), D) { todo!() }
+fn f() {
+    let (tx, rx) = channel();
+    tx.send();
+    rx.recv();
+    let (a, _, c) = trio();
+    c.go();
+    let (r, n) = open().unwrap();
+    r.read();
+    n.skip();
+}
+";
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        let ret = |name: &str| {
+            facts
+                .symbols
+                .iter()
+                .find(|s| s.name == name)
+                .and_then(|s| s.returns.clone())
+        };
+        let r = ret("channel").unwrap();
+        assert_eq!(
+            (r.ty.as_str(), r.parts),
+            ("", vec!["Sender".into(), "Receiver".into()])
+        );
+        let r = ret("open").unwrap();
+        assert_eq!(
+            (r.fallible, r.parts),
+            (true, vec!["Reader".to_string(), String::new()])
+        );
+        assert_eq!(ret("trio").unwrap().parts, vec!["A", "", "D"]);
+        let part = |callee: &str, n: u32, unwrapped: bool| {
+            Form::Returned(Box::new(Hop {
+                callee: callee.into(),
+                form: Form::Bare,
+                unwrapped,
+                part: Some(n),
+                ..Default::default()
+            }))
+        };
+        let got = forms_of(src, &["send", "recv", "go", "read", "skip"]);
+        assert_eq!(
+            got,
+            vec![
+                ("send".to_string(), part("channel", 0, false)),
+                ("recv".into(), part("channel", 1, false)),
+                ("go".into(), part("trio", 2, false)),
+                ("read".into(), part("open", 0, true)),
+                ("skip".into(), part("open", 1, true)),
+            ]
+        );
+    }
+
+    #[test]
+    fn tuple_patterns_with_rest_comments_types_and_nesting() {
+        let src = "fn f() {
+    let (a, .., d) = quad();
+    d.after_rest();
+    a.before_rest();
+    let (e, /* skip */ g) = pair(); // c
+    g.after_comment();
+    let (mut m, (n, o)) = nest();
+    m.with_mut();
+    n.nested();
+    let (p, q): (X, Y) = typed();
+    p.annotated();
+    let (_, u) = two();
+    u.after_underscore();
+    let (z, w) = notcall;
+    w.no_call();
+}
+";
+        let part = |callee: &str, n: u32| {
+            Form::Returned(Box::new(Hop {
+                callee: callee.into(),
+                form: Form::Bare,
+                part: Some(n),
+                ..Default::default()
+            }))
+        };
+        let got = forms_of(
+            src,
+            &[
+                "after_rest",
+                "before_rest",
+                "after_comment",
+                "with_mut",
+                "nested",
+                "annotated",
+                "after_underscore",
+                "no_call",
+            ],
+        );
+        let want = vec![
+            ("after_rest", Form::Method), // after `..` the index from the end is not known
+            ("before_rest", part("quad", 0)),
+            ("after_comment", part("pair", 1)),
+            ("with_mut", part("nest", 0)),
+            ("nested", Form::Method),
+            ("annotated", Form::Method), // the annotation, not the call, would be authoritative
+            ("after_underscore", part("two", 1)),
+            ("no_call", Form::Method),
+        ];
+        let want: Vec<(String, Form)> = want.into_iter().map(|(n, f)| (n.to_string(), f)).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn tuple_elements_edge_cases() {
+        assert_eq!(super::tuple_elements("(A, B,)"), Some(vec!["A", "B"]));
+        assert_eq!(super::tuple_elements("(A,)"), None);
+        assert_eq!(
+            super::tuple_elements("(A, Box<dyn Fn() -> B>)"),
+            Some(vec!["A", "Box<dyn Fn() -> B>"])
+        );
+        assert_eq!(
+            super::tuple_elements("(A, (B, C))"),
+            Some(vec!["A", "(B, C)"])
+        );
+        assert_eq!(super::tuple_elements("(A, B"), None);
+        assert_eq!(super::tuple_elements("A"), None);
     }
 }

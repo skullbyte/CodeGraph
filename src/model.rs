@@ -47,9 +47,12 @@ pub struct Symbol {
 
 /// A returned class. `fallible`: the signature said `Result<T, _>` or `Option<T>`, so `ty` is `T`
 /// and a caller only gets a `T` after `?` / `.unwrap()` / `.expect()`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Ret {
+    /// The returned class; empty when the function returns a tuple (see `parts`).
     pub ty: String,
+    /// The class of each element of a returned tuple, `""` for one that is not a plain class.
+    pub parts: Vec<String>,
     pub fallible: bool,
     /// An `async fn`: callers get `ty` only after `.await`.
     pub future: bool,
@@ -90,7 +93,7 @@ pub enum Form {
 }
 
 /// The call whose result is the receiver of a method call, as written.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hop {
     pub callee: String,
     pub form: Form,
@@ -98,6 +101,8 @@ pub struct Hop {
     pub unwrapped: bool,
     /// Followed by `.await`.
     pub awaited: bool,
+    /// Element `n` of the returned tuple, from `let (a, b) = call()`.
+    pub part: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +228,7 @@ mod tests {
                 form,
                 unwrapped: true,
                 awaited: true,
+                ..Default::default()
             }))
         };
         let entry = FileEntry {
@@ -237,6 +243,7 @@ mod tests {
                     ty: "Rt".into(),
                     fallible: true,
                     future: true,
+                    ..Default::default()
                 }),
             }],
             calls: vec![Call {

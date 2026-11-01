@@ -106,8 +106,14 @@ impl Resolver {
         let agree = picked
             .iter()
             .all(|&i| defs.get(i).and_then(|d| d.returns.as_ref()) == Some(first));
-        (agree && first.fallible == hop.unwrapped && first.future == hop.awaited)
-            .then(|| first.ty.clone())
+        if !(agree && first.fallible == hop.unwrapped && first.future == hop.awaited) {
+            return None;
+        }
+        let ty = match hop.part {
+            Some(n) => first.parts.get(n as usize)?,
+            None => &first.ty,
+        };
+        (!ty.is_empty()).then(|| ty.clone())
     }
 
     /// Indexes into `defs` that a call made in file `from` can reach: the best tier that has any
@@ -524,6 +530,7 @@ mod tests {
             form,
             unwrapped,
             awaited: false,
+            ..Default::default()
         })
     }
 
@@ -542,10 +549,19 @@ mod tests {
                 line: i as u32 + 1,
                 signature: String::new(),
                 container: container.map(String::from),
-                returns: returns.map(|(ty, fallible, future)| Ret {
-                    ty: ty.into(),
-                    fallible,
-                    future,
+                returns: returns.map(|(ty, fallible, future)| {
+                    // "A,B" stands for a tuple return `(A, B)`.
+                    let tuple = ty.contains(',');
+                    Ret {
+                        ty: if tuple { String::new() } else { ty.into() },
+                        parts: if tuple {
+                            ty.split(',').map(String::from).collect()
+                        } else {
+                            Vec::new()
+                        },
+                        fallible,
+                        future,
+                    }
                 }),
             })
             .collect();
@@ -676,6 +692,29 @@ mod tests {
             ..chained(Form::Returned(hop("open", Form::SelfRef, false)))
         };
         assert_eq!(r.resolve("x.rs", &own, &d), vec![0, 1], "Bar has no `open`");
+    }
+
+    #[test]
+    fn a_tuple_part_of_a_return_is_the_receiver_type() {
+        let r = resolver_with(&[("channel", None, Some(("Sender,Receiver", false, false)))]);
+        let d = vec![in_type("a.rs", 1, "Sender"), in_type("b.rs", 2, "Receiver")];
+        let part = |n: Option<u32>| {
+            let mut h = hop("channel", Form::Bare, false);
+            h.part = n;
+            chained(Form::Returned(h))
+        };
+        assert_eq!(r.resolve("x.rs", &part(Some(0)), &d), vec![0]);
+        assert_eq!(r.resolve("x.rs", &part(Some(1)), &d), vec![1]);
+        assert_eq!(
+            r.resolve("x.rs", &part(Some(7)), &d),
+            vec![0, 1],
+            "no such part"
+        );
+        assert_eq!(
+            r.resolve("x.rs", &part(None), &d),
+            vec![0, 1],
+            "a tuple has no methods"
+        );
     }
 
     #[test]
