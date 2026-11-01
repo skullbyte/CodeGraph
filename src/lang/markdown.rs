@@ -59,6 +59,7 @@ pub fn extract(src: &str) -> Facts {
                         .take(110)
                         .collect(),
                     container: None,
+                    returns: None,
                 });
                 scan.inline(title, line);
                 continue;

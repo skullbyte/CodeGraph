@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Parser};
 
 use super::{Facts, caller_name, field_text, line_of, signature, text};
-use crate::model::{Call, Form, Kind, Symbol};
+use crate::model::{Call, Form, Hop, Kind, Ret, Symbol};
 
 /// Where a walk is: the innermost `fn` (the caller of what it finds), the type or trait whose
 /// method that `fn` is (the `owner` of its calls) and the type or trait that items declared here
@@ -25,7 +25,24 @@ struct Ctx<'a> {
 
 /// Name -> `Some(type)`, or `None` when the name is declared but its type is not known (declared
 /// twice, a pattern, a closure parameter, a generic).
-type Locals = HashMap<String, Option<String>>;
+type Locals = HashMap<String, Option<Known>>;
+
+/// What is known of a name's type: its class, or the call chain that produced it (resolved later,
+/// when every file is in view).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Known {
+    Class(String),
+    Chain(Hop),
+}
+
+impl Known {
+    fn form(self) -> Form {
+        match self {
+            Known::Class(t) => Form::Type(t),
+            Known::Chain(hop) => Form::Returned(Box::new(hop)),
+        }
+    }
+}
 type Fields = HashMap<(String, String), String>;
 
 pub fn extract(root: Node, src: &str) -> Facts {
@@ -90,7 +107,7 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
         "call_expression" => {
             let function = node.child_by_field_name("function");
             let callee = function.and_then(|f| callee_name(f, src));
-            let form = function.map_or(Form::Unknown, |f| form_of(f, src, ctx));
+            let form = function.map_or(Form::Unknown, |f| form_of(f, src, ctx, 0));
             add_call(node, callee, form, facts, ctx);
         }
         "macro_invocation" => {
@@ -112,7 +129,8 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
         _ => {}
     }
     inner.enclosing = own.as_deref().or(ctx.enclosing);
-    let locals = (node.kind() == "function_item").then(|| local_types(node, src, ctx.owner));
+    let locals =
+        (node.kind() == "function_item").then(|| local_types(node, src, ctx.owner, ctx.fields));
     if let Some(l) = &locals {
         inner.locals = Some(l);
     }
@@ -229,8 +247,63 @@ fn add_item(
         line: line_of(node),
         signature: sig.clone(),
         container: container.map(String::from),
+        returns: (kind == Kind::Fn)
+            .then(|| returns_of(node, src, container))
+            .flatten(),
     });
     Some(sig)
+}
+
+/// What a `fn` returns, when the signature names one plain class: `-> Self` is the container,
+/// `-> Result<T, _>` / `-> io::Result<T>` / `-> Option<T>` is `T` (fallible), a generic or a
+/// primitive says nothing.
+fn returns_of(func: Node, src: &str, container: Option<&str>) -> Option<Ret> {
+    let written = text(func.child_by_field_name("return_type")?, src);
+    let generics = generic_names(func, src);
+    let future = {
+        let mut cursor = func.walk();
+        func.children(&mut cursor)
+            .any(|c| c.kind() == "function_modifiers" && text(c, src).contains("async"))
+    };
+    let path = type_path(written);
+    let last = path.rsplit("::").next().unwrap_or(path);
+    if matches!(last, "Result" | "Option") {
+        let inner = first_generic_arg(written)?;
+        let ty = known_type(inner, &generics, container)?;
+        return Some(Ret {
+            ty,
+            fallible: true,
+            future,
+        });
+    }
+    let ty = known_type(written, &generics, container)?;
+    Some(Ret {
+        ty,
+        fallible: false,
+        future,
+    })
+}
+
+/// `io::Result<Foo>` -> `Foo`, `Result<Foo, E>` -> `Foo`, `Option<Vec<u8>>` -> `Vec<u8>`.
+fn first_generic_arg(ty: &str) -> Option<&str> {
+    let start = ty.find('<')? + 1;
+    let mut depth = 0;
+    let mut prev = ' ';
+    for (i, c) in ty[start..].char_indices() {
+        let arrow = prev == '-' && c == '>'; // the `->` of a function type is not a bracket
+        prev = c;
+        if arrow {
+            continue;
+        }
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' if depth == 0 => return Some(ty[start..start + i].trim()),
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => return Some(ty[start..start + i].trim()),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// An `impl` has no name of its own, so it is named after the type it implements.
@@ -244,6 +317,7 @@ fn add_impl(node: Node, src: &str, facts: &mut Facts) {
         line: line_of(node),
         signature: signature(node, node.child_by_field_name("body"), src),
         container: None,
+        returns: None,
     });
 }
 
@@ -306,17 +380,22 @@ fn qualified(qualifier: Option<&str>) -> Form {
     }
 }
 
+/// Longest call chain read; a longer one is a plain method call.
+const MAX_CHAIN: usize = 32;
+
 /// How a call is written: `f()` bare, `self.f()` / `Self::f()` own method, `Foo::f()` a member of
 /// type Foo, `m::f()` a function of module m, `x.f()` a method of an unseen type.
-fn form_of(f: Node, src: &str, ctx: Ctx) -> Form {
+fn form_of(f: Node, src: &str, ctx: Ctx, depth: usize) -> Form {
     match f.kind() {
         "identifier" => Form::Bare,
         "generic_function" => f
             .child_by_field_name("function")
-            .map_or(Form::Unknown, |inner| form_of(inner, src, ctx)),
+            .map_or(Form::Unknown, |inner| form_of(inner, src, ctx, depth)),
         "field_expression" => match f.child_by_field_name("value") {
             Some(v) if text(v, src) == "self" => Form::SelfRef,
-            Some(v) => receiver_type(v, src, ctx).map_or(Form::Method, Form::Type),
+            Some(v) => receiver_type(v, src, ctx)
+                .or_else(|| hop_of(v, src, ctx, depth + 1).map(Known::Chain))
+                .map_or(Form::Method, Known::form),
             None => Form::Unknown,
         },
         "scoped_identifier" => {
@@ -332,7 +411,7 @@ fn form_of(f: Node, src: &str, ctx: Ctx) -> Form {
 }
 
 /// The declared type of a method call's receiver: a local with a known type, or `self.field`.
-fn receiver_type(value: Node, src: &str, ctx: Ctx) -> Option<String> {
+fn receiver_type(value: Node, src: &str, ctx: Ctx) -> Option<Known> {
     match value.kind() {
         "identifier" => ctx.locals?.get(text(value, src)).cloned().flatten(),
         "field_expression" => {
@@ -344,6 +423,48 @@ fn receiver_type(value: Node, src: &str, ctx: Ctx) -> Option<String> {
             ctx.fields?
                 .get(&(ctx.owner?.to_string(), field.to_string()))
                 .cloned()
+                .map(Known::Class)
+        }
+        _ => None,
+    }
+}
+
+/// The call whose result `expr` is: `a()`, `T::new()`, `x.f()`, optionally followed by `?`,
+/// `.unwrap()` or `.expect(..)`. Anything that is not such a call has no hop.
+fn hop_of(expr: Node, src: &str, ctx: Ctx, depth: usize) -> Option<Hop> {
+    if depth >= MAX_CHAIN {
+        return None;
+    }
+    match expr.kind() {
+        "await_expression" => {
+            let mut hop = hop_of(expr.named_child(0)?, src, ctx, depth)?;
+            hop.awaited = true;
+            Some(hop)
+        }
+        "try_expression" | "parenthesized_expression" => {
+            let mut hop = hop_of(expr.named_child(0)?, src, ctx, depth)?;
+            hop.unwrapped |= expr.kind() == "try_expression";
+            Some(hop)
+        }
+        "call_expression" => {
+            let function = expr.child_by_field_name("function")?;
+            let callee = callee_name(function, src)?;
+            if function.kind() == "field_expression" && matches!(callee, "unwrap" | "expect") {
+                let value = function.child_by_field_name("value")?;
+                // `r.unwrap()` where `let r = build();` continues the chain stored in `r`.
+                let mut hop = match receiver_type(value, src, ctx) {
+                    Some(Known::Chain(hop)) => hop,
+                    _ => hop_of(value, src, ctx, depth)?,
+                };
+                hop.unwrapped = true;
+                return Some(hop);
+            }
+            Some(Hop {
+                callee: callee.to_string(),
+                form: form_of(function, src, ctx, depth + 1),
+                unwrapped: false,
+                awaited: false,
+            })
         }
         _ => None,
     }
@@ -451,10 +572,16 @@ fn pattern_names(pattern: Node, src: &str, out: &mut Vec<String>) {
 /// The declared types of the names a `fn` introduces (parameters, `let`, patterns, closure
 /// parameters), not looking into nested items. A name declared twice with different types, in a
 /// pattern or as a closure parameter is unknown: no type is better than a wrong one.
-fn local_types(func: Node, src: &str, owner: Option<&str>) -> Locals {
+fn local_types(func: Node, src: &str, owner: Option<&str>, fields: Option<&Fields>) -> Locals {
     let generics = generic_names(func, src);
+    // Chains in a `let` are read before the names of this fn are known: only their roots count.
+    let chain_ctx = Ctx {
+        owner,
+        fields,
+        ..Ctx::default()
+    };
     let mut seen: Locals = HashMap::new();
-    let mut declare = |name: String, ty: Option<String>| {
+    let mut declare = |name: String, ty: Option<Known>| {
         seen.entry(name)
             .and_modify(|old| {
                 if *old != ty {
@@ -465,18 +592,21 @@ fn local_types(func: Node, src: &str, owner: Option<&str>) -> Locals {
     };
     let mut stack = vec![func];
     while let Some(n) = stack.pop() {
-        let typed = |decl: Node, pattern: Option<Node>| -> Option<String> {
+        let typed = |decl: Node, pattern: Option<Node>| -> Option<Known> {
             pattern.filter(|p| p.kind() == "identifier")?;
             decl.child_by_field_name("type")
                 .and_then(|t| known_type(text(t, src), &generics, owner))
+                .map(Known::Class)
         };
         match n.kind() {
             "parameter" | "let_declaration" => {
                 let pattern = n.child_by_field_name("pattern");
                 let ty = typed(n, pattern).or_else(|| {
                     let value = n.child_by_field_name("value")?;
-                    // `let x = T::new()` shows what it is when no annotation said so.
+                    // `let x = T::new()` shows the class; `let x = a().b()?` shows a chain.
                     built_type(value, src, &generics, owner)
+                        .map(Known::Class)
+                        .or_else(|| hop_of(value, src, chain_ctx, 0).map(Known::Chain))
                 });
                 if let Some(p) = pattern {
                     let mut names = Vec::new();
@@ -593,7 +723,7 @@ fn use_root(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::{Lang, extract as extract_file};
-    use crate::model::{Form, Kind};
+    use crate::model::{Form, Hop, Kind, Ret};
 
     const SRC: &str = "use std::fmt;
 use crate::util::helper;
@@ -1191,9 +1321,231 @@ impl<T> W<T> {
                 ("one".to_string(), Form::Method),
                 ("two".into(), Form::Method),
                 ("three".into(), ty("Baz")),
-                ("four".into(), Form::Method),
+                // A chain from `Arc::new`: no project type is called `Arc`, so it resolves like a
+                // plain method call (see `scope`).
+                ("four".into(), hop("new", Form::Type("Arc".into()), false)),
                 ("five".into(), Form::Method),
             ]
+        );
+    }
+
+    fn hop(callee: &str, form: Form, unwrapped: bool) -> Form {
+        Form::Returned(Box::new(Hop {
+            callee: callee.into(),
+            form,
+            unwrapped,
+            awaited: false,
+        }))
+    }
+
+    #[test]
+    fn functions_know_what_they_return() {
+        let src = "impl Builder {
+    fn new() -> Self { todo!() }
+    fn name(&mut self) -> &mut Self { self }
+    fn build(&self) -> io::Result<Runtime> { todo!() }
+    fn find(&self) -> Option<Item> { None }
+    fn count(&self) -> usize { 0 }
+    fn boxed(&self) -> Box<Foo> { todo!() }
+    fn generic<T>(&self) -> T { todo!() }
+}
+fn free() -> Widget { todo!() }
+fn nothing() {}
+";
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        let ret = |name: &str| {
+            facts
+                .symbols
+                .iter()
+                .find(|s| s.name == name)
+                .and_then(|s| s.returns.clone())
+        };
+        let r = |ty: &str, fallible| {
+            Some(Ret {
+                ty: ty.into(),
+                fallible,
+                future: false,
+            })
+        };
+        assert_eq!(ret("new"), r("Builder", false));
+        assert_eq!(ret("name"), r("Builder", false));
+        assert_eq!(ret("build"), r("Runtime", true));
+        assert_eq!(ret("find"), r("Item", true));
+        assert_eq!(ret("count"), None);
+        assert_eq!(ret("boxed"), None);
+        assert_eq!(ret("generic"), None);
+        assert_eq!(ret("free"), r("Widget", false));
+        assert_eq!(ret("nothing"), None);
+    }
+
+    #[test]
+    fn a_method_on_a_call_result_remembers_the_chain() {
+        let src = "fn f() {
+    Builder::new().name().go();
+    make().run();
+    Builder::new().build().unwrap().start();
+    Builder::new().build()?.stop();
+}
+";
+        let got = forms_of(src, &["go", "run", "start", "stop"]);
+        let builder = || Form::Type("Builder".into());
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "go".to_string(),
+                    hop("name", hop("new", builder(), false), false)
+                ),
+                ("run".into(), hop("make", Form::Bare, false)),
+                (
+                    "start".into(),
+                    hop("build", hop("new", builder(), false), true)
+                ),
+                (
+                    "stop".into(),
+                    hop("build", hop("new", builder(), false), true)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_variable_built_from_a_chain_has_that_chain_as_its_type() {
+        let src = "fn f() {
+    let rt = Builder::new().build().unwrap();
+    rt.run();
+    let again = Builder::new();
+    again.go();
+    let rt2 = other();
+    let rt2 = third();
+    rt2.skip();
+}
+";
+        let got = forms_of(src, &["run", "go", "skip"]);
+        let builder = || Form::Type("Builder".into());
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "run".to_string(),
+                    hop("build", hop("new", builder(), false), true)
+                ),
+                ("go".into(), ty("Builder")),
+                ("skip".into(), Form::Method),
+            ]
+        );
+    }
+
+    #[test]
+    fn async_fns_and_awaited_chains() {
+        let src = "impl Stream {
+    async fn connect(a: A) -> io::Result<Stream> { todo!() }
+    fn sync() -> Stream { todo!() }
+}
+async fn go() {
+    let s = Stream::connect(a).await?;
+    s.peer();
+    Stream::connect(a).await.unwrap().split();
+}
+";
+        let facts = extract_file(Lang::Rust, src).unwrap();
+        let ret = |name: &str| {
+            facts
+                .symbols
+                .iter()
+                .find(|s| s.name == name)
+                .and_then(|s| s.returns.clone())
+                .map(|r| (r.fallible, r.future))
+        };
+        assert_eq!(ret("connect"), Some((true, true)));
+        assert_eq!(ret("sync"), Some((false, false)));
+        let want = Form::Returned(Box::new(Hop {
+            callee: "connect".into(),
+            form: Form::Type("Stream".into()),
+            unwrapped: true,
+            awaited: true,
+        }));
+        let got = forms_of(src, &["peer", "split"]);
+        assert_eq!(
+            got,
+            vec![("peer".to_string(), want.clone()), ("split".into(), want)]
+        );
+    }
+
+    #[test]
+    fn unwrapping_a_variable_that_holds_a_chain_extends_the_chain() {
+        let src = "fn f() {
+    let r = build();
+    r.unwrap().run();
+    let q = Builder::new().build().map_err(wrap)?;
+    q.go();
+}
+";
+        let got = forms_of(src, &["run", "go"]);
+        assert_eq!(
+            got,
+            vec![
+                ("run".to_string(), hop("build", Form::Bare, true)),
+                (
+                    "go".into(),
+                    hop(
+                        "map_err",
+                        hop("build", hop("new", ty("Builder"), false), false),
+                        true
+                    )
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chain_declared_twice_or_over_a_typed_parameter_is_unknown() {
+        let src = "fn f(r: Foo) {
+    let r = make();
+    r.go();
+    let s = a();
+    let s = b();
+    s.go();
+    let t = a();
+    let t = a();
+    t.go();
+}
+";
+        let got = forms_of(src, &["go"]);
+        assert_eq!(
+            got.iter().map(|(_, f)| f.clone()).collect::<Vec<_>>(),
+            vec![Form::Method, Form::Method, hop("a", Form::Bare, false)]
+        );
+    }
+
+    #[test]
+    fn a_very_long_chain_is_read_without_deep_recursion() {
+        let src = format!(
+            "fn f() {{ Builder::new(){}.last(); }}",
+            ".step()".repeat(300)
+        );
+        let facts = extract_file(Lang::Rust, &src).unwrap();
+        assert_eq!(
+            facts.calls.iter().filter(|c| c.callee == "step").count(),
+            300
+        );
+        let depth = |f: &Form| {
+            let (mut n, mut cur) = (0, f);
+            while let Form::Returned(h) = cur {
+                n += 1;
+                cur = &h.form;
+            }
+            n
+        };
+        let last = facts.calls.iter().find(|c| c.callee == "last").unwrap();
+        assert!(depth(&last.form) <= 40, "chain depth is capped");
+    }
+
+    #[test]
+    fn a_function_type_arrow_is_not_a_closing_bracket() {
+        assert_eq!(
+            super::first_generic_arg("Option<Box<dyn Fn() -> Foo>>"),
+            Some("Box<dyn Fn() -> Foo>")
         );
     }
 }

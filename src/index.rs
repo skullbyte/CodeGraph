@@ -13,7 +13,7 @@ use crate::model::{FileEntry, Index};
 use crate::{query, walk};
 
 /// Bump when the graph.json layout or extraction rules change; old caches are then ignored.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// How many files were parsed afresh versus taken from the cache.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -377,6 +377,16 @@ mod tests {
         save(dir.path(), &index).unwrap();
         assert!(graph_path(dir.path()).is_file());
         assert_eq!(load(dir.path()), Some(index));
+    }
+
+    #[test]
+    fn a_graph_from_another_version_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.rs", "fn a() {}\n");
+        let (mut index, _) = build(dir.path(), None).unwrap();
+        index.version = VERSION - 1; // e.g. a v5 graph.bin, before `Form::Returned`
+        save(dir.path(), &index).unwrap();
+        assert_eq!(load(dir.path()), None);
     }
 
     #[test]

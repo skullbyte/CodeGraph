@@ -40,6 +40,19 @@ pub struct Symbol {
     /// level items). Tells methods from functions when several definitions share a name.
     #[serde(default)]
     pub container: Option<String>,
+    /// What a function returns, when its signature names a plain class (`-> Self`, `-> Builder`).
+    #[serde(default)]
+    pub returns: Option<Ret>,
+}
+
+/// A returned class. `fallible`: the signature said `Result<T, _>` or `Option<T>`, so `ty` is `T`
+/// and a caller only gets a `T` after `?` / `.unwrap()` / `.expect()`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Ret {
+    pub ty: String,
+    pub fallible: bool,
+    /// An `async fn`: callers get `ty` only after `.await`.
+    pub future: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +85,19 @@ pub enum Form {
     Module(String),
     /// `value.f()`: a method of a type we cannot see.
     Method,
+    /// `a().f()`: a method of whatever the earlier call returns (found step by step, see `scope`).
+    Returned(Box<Hop>),
+}
+
+/// The call whose result is the receiver of a method call, as written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hop {
+    pub callee: String,
+    pub form: Form,
+    /// Followed by `?`, `.unwrap()` or `.expect()`.
+    pub unwrapped: bool,
+    /// Followed by `.await`.
+    pub awaited: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +211,43 @@ mod tests {
         let old = r#"{"path":"a.rs","hash":"h","lines":1,"symbols":[],"imports":[],"calls":[]}"#;
         let entry: FileEntry = serde_json::from_str(old).unwrap();
         assert!(entry.resolved.is_empty());
+        let bytes = postcard::to_stdvec(&entry).unwrap();
+        assert_eq!(postcard::from_bytes::<FileEntry>(&bytes).unwrap(), entry);
+    }
+
+    #[test]
+    fn nested_chains_and_return_types_survive_postcard() {
+        let hop = |callee: &str, form: Form| {
+            Form::Returned(Box::new(Hop {
+                callee: callee.into(),
+                form,
+                unwrapped: true,
+                awaited: true,
+            }))
+        };
+        let entry = FileEntry {
+            path: "a.rs".into(),
+            symbols: vec![Symbol {
+                name: "build".into(),
+                kind: Kind::Fn,
+                line: 1,
+                signature: "fn build() -> Result<Rt>".into(),
+                container: Some("Builder".into()),
+                returns: Some(Ret {
+                    ty: "Rt".into(),
+                    fallible: true,
+                    future: true,
+                }),
+            }],
+            calls: vec![Call {
+                callee: "run".into(),
+                line: 2,
+                caller: None,
+                form: hop("build", hop("new", Form::Type("Builder".into()))),
+                owner: None,
+            }],
+            ..FileEntry::default()
+        };
         let bytes = postcard::to_stdvec(&entry).unwrap();
         assert_eq!(postcard::from_bytes::<FileEntry>(&bytes).unwrap(), entry);
     }

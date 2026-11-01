@@ -104,6 +104,7 @@ fn add_item(
             line: line_of(node),
             signature: sig.trim_end_matches([':', ';', ' ']).to_string(),
             container: container.map(String::from),
+            returns: None,
         });
     }
     names

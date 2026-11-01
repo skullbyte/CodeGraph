@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::lang::Lang;
-use crate::model::{Call, Form, Index};
+use crate::model::{Call, Form, Hop, Index, Ret};
 use crate::query;
 
 /// A project definition: file, 1-based line (as SCIP names it) and the type or trait it is in.
@@ -15,6 +15,8 @@ pub struct Def {
     pub path: String,
     pub line: u32,
     pub container: Option<String>,
+    /// The class the function returns, when its signature says so.
+    pub returns: Option<Ret>,
 }
 
 /// Where a definition sits relative to a call, best first. `SameFolder` also holds the caller's own
@@ -34,6 +36,18 @@ impl Tier {
 pub struct Resolver {
     /// File -> the other project files it imports.
     imports: HashMap<String, BTreeSet<String>>,
+    /// Every project definition by name: what a step of a call chain can be.
+    by_name: HashMap<String, Vec<Def>>,
+}
+
+/// Longest call chain followed; a longer one is read as a plain method call.
+const MAX_CHAIN: usize = 32;
+
+/// Indexes into `defs` whose container is `ty`.
+fn members_of(defs: &[Def], ty: &str) -> Vec<usize> {
+    (0..defs.len())
+        .filter(|&i| defs[i].container.as_deref() == Some(ty))
+        .collect()
 }
 
 /// Folder of an index path; `""` for a file at the project root.
@@ -47,9 +61,53 @@ impl Resolver {
         for (file, targets) in &mut imports {
             targets.remove(file); // `from . import x` can resolve to the file itself
         }
+        let mut by_name: HashMap<String, Vec<Def>> = HashMap::new();
+        for file in index.files.values() {
+            for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
+                by_name.entry(s.name.clone()).or_default().push(Def {
+                    path: file.path.clone(),
+                    line: s.line,
+                    container: s.container.clone(),
+                    returns: s.returns.clone(),
+                });
+            }
+        }
         Resolver {
             imports: imports.into_iter().collect(),
+            by_name,
         }
+    }
+
+    /// The class an earlier call in a chain returns: resolve that call, and when every definition
+    /// it can reach returns the same class, that is the receiver's type. `?` / `.unwrap()` must
+    /// match a `Result`/`Option` return, and only those. A step written as a plain method call
+    /// (`x.get(k)`) is never trusted: `x` may be a std type that shares the name.
+    fn hop_type(&self, from: &str, hop: &Hop, owner: Option<&str>, depth: usize) -> Option<String> {
+        if depth >= MAX_CHAIN {
+            return None;
+        }
+        let defs = self.by_name.get(&hop.callee)?;
+        let picked = match &hop.form {
+            Form::Method | Form::Unknown => return None,
+            Form::Returned(inner) => {
+                let ty = self.hop_type(from, inner, owner, depth + 1)?;
+                members_of(defs, &ty)
+            }
+            Form::Type(ty) => members_of(defs, ty),
+            // The wider fallback of `resolve_form` may not decide a type: keep real matches only.
+            Form::SelfRef => owner.map_or_else(Vec::new, |o| members_of(defs, o)),
+            Form::Bare | Form::Module(_) => self
+                .resolve_form(from, &hop.form, owner, defs, depth + 1)
+                .into_iter()
+                .filter(|&i| defs[i].container.is_none())
+                .collect(),
+        };
+        let first = defs.get(*picked.first()?)?.returns.as_ref()?;
+        let agree = picked
+            .iter()
+            .all(|&i| defs.get(i).and_then(|d| d.returns.as_ref()) == Some(first));
+        (agree && first.fallible == hop.unwrapped && first.future == hop.awaited)
+            .then(|| first.ty.clone())
     }
 
     /// Indexes into `defs` that a call made in file `from` can reach: the best tier that has any
@@ -68,19 +126,30 @@ impl Resolver {
     /// override of it are different containers and are not linked to each other (known gap). Each rule falls back to the wider set
     /// when it would leave nothing, so a rule can only narrow, never invent.
     pub fn resolve(&self, from: &str, call: &Call, defs: &[Def]) -> Vec<usize> {
+        self.resolve_form(from, &call.form, call.owner.as_deref(), defs, 0)
+    }
+
+    fn resolve_form(
+        &self,
+        from: &str,
+        form: &Form,
+        owner: Option<&str>,
+        defs: &[Def],
+        depth: usize,
+    ) -> Vec<usize> {
         let all = || (0..defs.len()).collect::<Vec<_>>();
-        let of_type = |t: &str| -> Vec<usize> {
-            (0..defs.len())
-                .filter(|&i| defs[i].container.as_deref() == Some(t))
-                .collect()
-        };
+        let of_type = |t: &str| members_of(defs, t);
         let narrowed = |set: Vec<usize>| if set.is_empty() { all() } else { set };
-        match &call.form {
+        match form {
+            Form::Returned(hop) => match self.hop_type(from, hop, owner, depth) {
+                Some(t) => match of_type(&t) {
+                    members if !members.is_empty() => members,
+                    _ => self.resolve_form(from, &Form::Method, owner, defs, depth),
+                },
+                None => self.resolve_form(from, &Form::Method, owner, defs, depth),
+            },
             Form::Unknown => all(),
-            Form::SelfRef => call
-                .owner
-                .as_deref()
-                .map_or_else(all, |o| narrowed(of_type(o))),
+            Form::SelfRef => owner.map_or_else(all, |o| narrowed(of_type(o))),
             Form::Type(t) => narrowed(of_type(t)),
             Form::Method => narrowed(
                 (0..defs.len())
@@ -91,15 +160,15 @@ impl Resolver {
                 let mut set: Vec<usize> = (0..defs.len())
                     .filter(|&i| defs[i].container.is_none())
                     .collect();
-                if call.form == Form::Bare && implicit_this(from) {
-                    set.extend(call.owner.as_deref().map(of_type).unwrap_or_default());
+                if *form == Form::Bare && implicit_this(from) {
+                    set.extend(owner.map(of_type).unwrap_or_default());
                     set.sort_unstable();
                 }
                 if set.is_empty() {
                     return all();
                 }
                 // `time::advance()` lives in `time.rs` or somewhere under `time/`.
-                if let Form::Module(m) = &call.form {
+                if let Form::Module(m) = form {
                     let named: Vec<usize> = set
                         .iter()
                         .copied()
@@ -193,6 +262,7 @@ mod tests {
                 path: p.to_string(),
                 line: *l,
                 container: None,
+                returns: None,
             })
             .collect()
     }
@@ -202,6 +272,7 @@ mod tests {
             path: path.into(),
             line,
             container: Some(container.into()),
+            returns: None,
         }
     }
 
@@ -445,5 +516,207 @@ mod tests {
             r.resolve("A.kt", &call(Form::Bare, Some("A")), &d),
             vec![0, 2]
         );
+    }
+
+    fn hop(callee: &str, form: Form, unwrapped: bool) -> Box<Hop> {
+        Box::new(Hop {
+            callee: callee.into(),
+            form,
+            unwrapped,
+            awaited: false,
+        })
+    }
+
+    /// (name, container, (returned class, fallible, async))
+    type Sym<'a> = (&'a str, Option<&'a str>, Option<(&'a str, bool, bool)>);
+
+    fn resolver_with(symbols: &[Sym]) -> Resolver {
+        use crate::model::{Kind, Symbol};
+        let mut f = file("src/a.rs", &[]);
+        f.symbols = symbols
+            .iter()
+            .enumerate()
+            .map(|(i, (name, container, returns))| Symbol {
+                name: name.to_string(),
+                kind: Kind::Fn,
+                line: i as u32 + 1,
+                signature: String::new(),
+                container: container.map(String::from),
+                returns: returns.map(|(ty, fallible, future)| Ret {
+                    ty: ty.into(),
+                    fallible,
+                    future,
+                }),
+            })
+            .collect();
+        Resolver::new(&index(vec![f]))
+    }
+
+    fn chained(form: Form) -> Call {
+        call(form, None)
+    }
+
+    #[test]
+    fn a_call_chain_is_followed_through_the_return_types() {
+        // Builder::new() -> Builder; Builder::enable() -> Builder; build exists on two types.
+        let r = resolver_with(&[
+            ("new", Some("Builder"), Some(("Builder", false, false))),
+            ("enable", Some("Builder"), Some(("Builder", false, false))),
+            ("new", Some("Other"), Some(("Other", false, false))),
+        ]);
+        let d = vec![
+            in_type("src/a.rs", 90, "Builder"),
+            in_type("src/b.rs", 91, "Other"),
+        ];
+        let one = chained(Form::Returned(hop(
+            "new",
+            Form::Type("Builder".into()),
+            false,
+        )));
+        assert_eq!(r.resolve("x.rs", &one, &d), vec![0]);
+        let two = chained(Form::Returned(hop(
+            "enable",
+            Form::Returned(hop("new", Form::Type("Builder".into()), false)),
+            false,
+        )));
+        assert_eq!(r.resolve("x.rs", &two, &d), vec![0]);
+    }
+
+    #[test]
+    fn unwrapping_must_match_a_fallible_return() {
+        let r = resolver_with(&[
+            ("build", Some("Builder"), Some(("Runtime", true, false))),
+            ("make", Some("Builder"), Some(("Runtime", false, false))),
+        ]);
+        let d = vec![in_type("a.rs", 1, "Runtime"), in_type("b.rs", 2, "Other")];
+        let builder = || Form::Type("Builder".into());
+        let unwrapped = chained(Form::Returned(hop("build", builder(), true)));
+        assert_eq!(r.resolve("x.rs", &unwrapped, &d), vec![0]);
+        let forgot = chained(Form::Returned(hop("build", builder(), false)));
+        assert_eq!(
+            r.resolve("x.rs", &forgot, &d),
+            vec![0, 1],
+            "a Result's own method"
+        );
+        let needless = chained(Form::Returned(hop("make", builder(), true)));
+        assert_eq!(r.resolve("x.rs", &needless, &d), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_chain_with_unknown_or_disagreeing_steps_is_a_plain_method_call() {
+        let r = resolver_with(&[
+            ("a", Some("X"), Some(("One", false, false))),
+            ("a", Some("Y"), Some(("Two", false, false))),
+            ("untyped", None, None),
+        ]);
+        let d = vec![
+            in_type("a.rs", 1, "One"),
+            in_type("b.rs", 2, "Two"),
+            defs(&[("free.rs", 3)]).remove(0),
+        ];
+        // `a` is on X and Y, which return different classes: unknown.
+        let split = chained(Form::Returned(hop("a", Form::Method, false)));
+        assert_eq!(r.resolve("x.rs", &split, &d), vec![0, 1], "methods only");
+        let no_return = chained(Form::Returned(hop("untyped", Form::Bare, false)));
+        assert_eq!(r.resolve("x.rs", &no_return, &d), vec![0, 1]);
+        let nobody = chained(Form::Returned(hop("missing", Form::Bare, false)));
+        assert_eq!(r.resolve("x.rs", &nobody, &d), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_hop_with_an_uncertain_form_is_not_trusted() {
+        // `map.get(k).unwrap().run()` on a std map must not pin to the project's `get -> Foo`.
+        let r = resolver_with(&[("get", Some("Cache"), Some(("Foo", true, false)))]);
+        let d = vec![in_type("a.rs", 1, "Foo"), in_type("b.rs", 2, "Other")];
+        for form in [Form::Method, Form::Unknown] {
+            let c = chained(Form::Returned(hop("get", form, true)));
+            assert_eq!(r.resolve("x.rs", &c, &d), vec![0, 1]);
+        }
+        // The same call written `Cache::get(..)` is certain.
+        let sure = chained(Form::Returned(hop("get", Form::Type("Cache".into()), true)));
+        assert_eq!(r.resolve("x.rs", &sure, &d), vec![0]);
+    }
+
+    #[test]
+    fn a_step_that_did_not_resolve_poisons_the_rest_of_the_chain() {
+        let r = resolver_with(&[
+            ("get", Some("Cache"), Some(("Foo", false, false))),
+            ("next", Some("Foo"), Some(("Foo", false, false))),
+        ]);
+        let d = vec![in_type("a.rs", 1, "Foo"), in_type("b.rs", 2, "Other")];
+        let inner = Form::Returned(hop("get", Form::Method, false));
+        let c = chained(Form::Returned(hop("next", inner, false)));
+        assert_eq!(r.resolve("x.rs", &c, &d), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_returned_class_with_no_members_falls_back_to_methods_only() {
+        // `-> Vec<Foo>`: the class `Vec` has no project members; free functions must not join in.
+        let r = resolver_with(&[("items", Some("Cache"), Some(("Vec", false, false)))]);
+        let d = vec![in_type("a.rs", 1, "Foo"), defs(&[("free.rs", 2)]).remove(0)];
+        let c = chained(Form::Returned(hop(
+            "items",
+            Form::Type("Cache".into()),
+            false,
+        )));
+        assert_eq!(r.resolve("x.rs", &c, &d), vec![0]);
+    }
+
+    #[test]
+    fn a_bare_or_module_step_needs_a_real_free_function() {
+        // `open()` may be an imported external fn; the project only has a method `open`.
+        let r = resolver_with(&[("open", Some("Foo"), Some(("Foo", false, false)))]);
+        let d = vec![in_type("a.rs", 1, "Foo"), in_type("b.rs", 2, "Other")];
+        for form in [Form::Bare, Form::Module("fs".into())] {
+            let c = chained(Form::Returned(hop("open", form, false)));
+            assert_eq!(r.resolve("x.rs", &c, &d), vec![0, 1]);
+        }
+        let own = Call {
+            owner: Some("Bar".into()),
+            ..chained(Form::Returned(hop("open", Form::SelfRef, false)))
+        };
+        assert_eq!(r.resolve("x.rs", &own, &d), vec![0, 1], "Bar has no `open`");
+    }
+
+    #[test]
+    fn a_very_long_chain_resolves_without_blowing_up() {
+        let r = resolver_with(&[
+            ("new", Some("B"), Some(("B", false, false))),
+            ("step", Some("B"), Some(("B", false, false))),
+        ]);
+        let d = vec![in_type("a.rs", 1, "B"), in_type("b.rs", 2, "Other")];
+        let mut form = Form::Returned(hop("new", Form::Type("B".into()), false));
+        for _ in 0..300 {
+            form = Form::Returned(hop("step", form, false));
+        }
+        let started = std::time::Instant::now();
+        // Past the depth cap the chain is just a method call: still contains the truth.
+        assert!(r.resolve("x.rs", &chained(form), &d).contains(&0));
+        assert!(started.elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn awaiting_matches_an_async_fn_only() {
+        let r = resolver_with(&[
+            ("connect", Some("Stream"), Some(("Stream", true, true))),
+            ("sync", Some("Stream"), Some(("Stream", false, false))),
+        ]);
+        let d = vec![in_type("a.rs", 1, "Stream"), in_type("b.rs", 2, "Other")];
+        let stream = || Form::Type("Stream".into());
+        let step = |callee: &str, unwrapped, awaited| {
+            let mut h = hop(callee, stream(), unwrapped);
+            h.awaited = awaited;
+            chained(Form::Returned(h))
+        };
+        assert_eq!(r.resolve("x.rs", &step("connect", true, true), &d), vec![0]);
+        assert_eq!(
+            r.resolve("x.rs", &step("connect", true, false), &d),
+            vec![0, 1]
+        );
+        assert_eq!(
+            r.resolve("x.rs", &step("sync", false, true), &d),
+            vec![0, 1]
+        );
+        assert_eq!(r.resolve("x.rs", &step("sync", false, false), &d), vec![0]);
     }
 }

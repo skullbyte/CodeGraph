@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::model::{Call, FileEntry, Index, Resolution};
+use crate::model::{Call, FileEntry, Form, Index, Resolution};
 use crate::scope::{Def, Resolver, Tier};
 
 /// One way of choosing among the definitions of a name, scored against SCIP.
@@ -41,6 +41,8 @@ pub struct Report {
     /// field, a declaration): no strategy could find it, so they are left out of the scores.
     pub unscored: usize,
     pub scores: Vec<Score>,
+    /// The `form` strategy again, split by how the call is written (one `Score` per form).
+    pub by_form: Vec<Score>,
 }
 
 /// Picks candidate definitions (indexes into the name's definition list) for a call made in
@@ -102,6 +104,7 @@ fn definitions(index: &Index) -> HashMap<&str, Vec<Def>> {
                 path: file.path.clone(),
                 line: s.line,
                 container: s.container.clone(),
+                returns: s.returns.clone(),
             });
         }
     }
@@ -150,19 +153,47 @@ pub fn measure(index: &Index) -> Report {
                 continue;
             };
             report.truth += 1;
-            for ((_, pick), score) in STRATEGIES.iter().zip(&mut report.scores) {
-                score.add(
-                    &pick(&resolver, file, call, candidates),
-                    truth,
-                    candidates.len(),
-                );
+            for ((name, pick), score) in STRATEGIES.iter().zip(&mut report.scores) {
+                let picked = pick(&resolver, file, call, candidates);
+                score.add(&picked, truth, candidates.len());
+                if *name == "form" {
+                    let kind = form_kind(&call.form);
+                    let at = match report.by_form.iter().position(|s| s.name == kind) {
+                        Some(at) => at,
+                        None => {
+                            report.by_form.push(Score {
+                                name: kind,
+                                ..Default::default()
+                            });
+                            report.by_form.len() - 1
+                        }
+                    };
+                    report.by_form[at].add(&picked, truth, candidates.len());
+                }
             }
         }
     }
     report
 }
 
+/// The kind of a call form, for the breakdown.
+fn form_kind(form: &Form) -> &'static str {
+    match form {
+        Form::Unknown => "unknown",
+        Form::Bare => "bare",
+        Form::SelfRef => "self",
+        Form::Type(_) => "type",
+        Form::Module(_) => "module",
+        Form::Method => "method",
+        Form::Returned(_) => "chain",
+    }
+}
+
 impl Score {
+    fn total(&self) -> usize {
+        self.unique_right + self.unique_wrong + self.narrowed + self.ambiguous + self.lost
+    }
+
     fn add(&mut self, picked: &[usize], truth: usize, all: usize) {
         let hit = picked.contains(&truth);
         match (hit, picked.len()) {
@@ -223,6 +254,24 @@ impl Report {
                 of(s.lost)
             ));
         }
+        if !self.by_form.is_empty() {
+            out.push("  `form` by how the call is written:".into());
+            let mut kinds: Vec<&Score> = self.by_form.iter().collect();
+            kinds.sort_by_key(|s| std::cmp::Reverse(s.total()));
+            for s in kinds {
+                let of = |n| format!("{}%", percent(n, s.total()));
+                out.push(format!(
+                    "    {} ({}): right {}, wrong {}, narrowed {}, still all {}, lost {}",
+                    s.name,
+                    s.total(),
+                    of(s.unique_right),
+                    of(s.unique_wrong),
+                    of(s.narrowed),
+                    of(s.ambiguous),
+                    of(s.lost)
+                ));
+            }
+        }
         if self.unscored > 0 {
             out.push(unscored);
         }
@@ -242,6 +291,7 @@ mod tests {
             line,
             signature: format!("fn {name}()"),
             container: None,
+            returns: None,
         }
     }
 
@@ -430,5 +480,18 @@ mod tests {
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["scores"][0]["name"], "name");
         assert_eq!(json["truth"], 2);
+    }
+
+    #[test]
+    fn the_form_strategy_is_also_split_by_how_calls_are_written() {
+        let r = measure(&sample());
+        let total: usize = r.by_form.iter().map(Score::total).sum();
+        assert_eq!(
+            total, r.truth,
+            "every scored call lands in exactly one kind"
+        );
+        assert!(r.by_form.iter().all(|s| s.total() > 0));
+        let text = r.lines().join("\n");
+        assert!(text.contains("`form` by how the call is written"), "{text}");
     }
 }

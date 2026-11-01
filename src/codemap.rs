@@ -68,6 +68,7 @@ mod tests {
                     line: 11,
                     signature: "pub fn parse(input: &str) -> Option<Temp>".into(),
                     container: None,
+                    returns: None,
                 }],
                 ..FileEntry::default()
             },

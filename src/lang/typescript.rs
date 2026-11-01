@@ -253,6 +253,7 @@ fn add_item(
             line: line_of(start),
             signature: sig.clone(),
             container: container.map(String::from),
+            returns: None,
         });
     }
     Some(sig)
@@ -286,6 +287,7 @@ fn add_variable(node: Node, src: &str, facts: &mut Facts) -> Option<String> {
             line: line_of(start),
             signature: sig.clone(),
             container: None,
+            returns: None,
         });
     }
     function.map(|_| caller_name(&sig))
