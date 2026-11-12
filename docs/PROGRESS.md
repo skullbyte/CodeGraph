@@ -1,10 +1,11 @@
 # codegraph progress
 
 ## Now
-Session 2026-11-12: all committed (up to c69f928), `just check` green (493 lib + 43 cli tests). Done: A3, B2 (`codegraph stats` + SCIP hint), C0 (partial SCIP re-apply; no rewrite of an unchanged graph).
-Next step: from `docs/TODO.md`: C3, then C1/C2 (C1/C2 need the user's format decision); hard ones E1-E3 with `/model opus` chosen before starting.
-Scores (tokio form): right 64% / wrong 0% / narrowed 22% / lost 0%; this repo 97% right; zod 8%. SCIP on this repo: 14368 of 14885 calls resolved (2026-11-12).
-`origin` = github.com/skullbyte/CodeGraph; pushed up to 9ef627d; later commits not pushed (user pushes with `!`).
+Session 2026-11-12: all committed and pushed (up to 98b3143), `just check` green (493 lib + 44 cli tests). Done: A3, B2 (`codegraph stats` + SCIP hint), C0 (partial SCIP re-apply 96 -> 65 ms; no rewrite of an unchanged graph 48 -> 32 ms).
+Goal now: precision first (user's order), speed (C1-C3) after. Order: E1 -> E2 -> E3; E5 only with the user's OK per SCIP indexer.
+Next step: E1, TS return-type chains (zod 8% right): plan mode first; port Rust's `Ret`/`Form::Returned` design to `src/lang/typescript.rs`; measure zod before/after (scip-typescript in `bench/real/zod/packages/zod`, see Gotchas).
+Scores (tokio form): right 64% / wrong 0% / narrowed 22% / lost 0%; this repo 97% right; zod 8%. SCIP on this repo: 14454 of 14973 calls resolved (2026-11-12).
+`origin` = github.com/skullbyte/CodeGraph; `main` tracks `origin/main`, pushed up to 98b3143 (user pushes with `! git push`).
 Rules: tests first, model `opusplan` (opus only for hard tasks, chosen before the first message), `code-reviewer` (sonnet, diff only, max 3 rounds) until "no remaining issues", commit by file name, no AI attribution, never push unless asked, `cargo add` only by the user with `!`.
 
 ## Checklist
@@ -81,6 +82,8 @@ New decisions go here, one dated line each; older ones are in `docs/HISTORY.md` 
 - 2026-11-12 PROGRESS.md split: dated decisions/notes live in `docs/HISTORY.md` (search with rg), open work in `docs/TODO.md` (single list): PROGRESS was ~20k tokens read every session
 - 2026-11-12 big test blocks move to `src/<module>/tests.rs` (`mod tests;`): agents read the code without 1k lines of tests
 - 2026-11-12 workflow: default model `opusplan`, `/model opus` only before a hard task (a mid-session switch re-reads the whole context uncached); all subagents incl. `code-reviewer` on sonnet, diff only, max 3 rounds; global CLAUDE.md uses `codegraph` for code search in every project (callers.sh retired)
+- 2026-11-12 priority: precision of languages before more speed work (user): E1 TS chains, E2 Rust type identity, E3 macro_rules; then C3, C1/C2
+- 2026-11-12 `index` re-matches SCIP calls only in re-parsed files and skips writing an unchanged graph; a SCIP file newer than graph.json forces both a full re-apply and a write: else its stamp keeps forcing a full re-apply
 - 2026-11-12 release profile tuning (fat LTO, codegen-units=1) measured: -1% index, -6% callers: not worth the build time; `strip` only saves 3 MB; never `panic = "abort"` (PDF reader uses catch_unwind)
 
 ## Gotchas
@@ -88,6 +91,7 @@ New decisions go here, one dated line each; older ones are in `docs/HISTORY.md` 
 - Pushing: ask the user to run `! git push` (Claude is denied, no `gh` login). Check `git remote -v` after any `set-url`: a stray trailing `.` once broke the URL
 - After `cargo fmt`, a literal `str.replace` on code can silently miss (fmt reflows lists/calls): twice a reviewed fix was not applied. Check with `rg` that every scripted edit landed; prefer slices over fixed-size arrays for name lists
 - SCIP indexers live in ~/.local/bin (scip-go, scip-java, scip-clang, scip-ruby), npm -g (scip-typescript, scip-python), ~/.dotnet/tools (scip-dotnet, not on PATH). Run indexers in the repo root; for zod run in `bench/real/zod/packages/zod` (`scip-typescript index --no-progress-bar`; `--pnpm-workspaces` fails). After every `cargo install` the fingerprint changes: re-run `codegraph index && codegraph scip` before `codegraph precision` (tokio: `cd bench/tokio`)
+- Linux file times advance in coarse clock ticks (a few ms): tests comparing mtimes must sleep ~50 ms between writes. Multi-line `sd -F` patterns silently fail to match: use Edit
 - Reviewer subagents sometimes edit the file to probe: check `git diff --stat` and run `just check` before committing
 - tree-sitter grammar field names differ per version: check `node-types.json` in ~/.cargo/registry/src/*/tree-sitter-<lang>-*/src (e.g. rust `type_parameters` children are `type_parameter`)
 - Scratchpad analysis scripts (byform.py, meth*.py, barewrong.py, chainshare.py, score.py, unscored.py) are in the session scratchpad and not kept
