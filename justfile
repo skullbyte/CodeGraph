@@ -19,6 +19,10 @@ fmt-rs:
 fmt-check-rs:
     cargo fmt --all --check
 
+# Install the binary with the locked dependency versions (the ones the tests ran with)
+install:
+    cargo install --locked --path .
+
 # Refresh exact call data (SCIP) after code changes; needs rust-analyzer and an installed codegraph
 scip:
     codegraph scip --run

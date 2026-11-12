@@ -3,14 +3,14 @@ Fast offline code-graph CLI in Rust: lets AI agents ask "where is X / who calls 
 
 ## Commands
 - Check all (run before saying you're done): `just check`
-- Refresh exact call data: `just scip` (run it after code changes, before using the codegraph MCP tools to answer; `cargo install --path .` first if the binary changed)
+- Refresh exact call data: `just scip` (run it after code changes, before using the codegraph MCP tools to answer; `just install` first if the code changed)
 - Test: `just test` · one test: `cargo test <name>`
 - Lint: `just lint` · Format: `just fmt`
 - Run: `cargo run -- <args>` · Build: `cargo build`
 - Without just: `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt`
 
 ## Layout
-- `src/` — Rust source (entry: `src/main.rs`, still a stub)
+- `src/` — Rust source (entry: `src/main.rs`; one module per command, languages in `src/lang/`). Big test blocks live beside their file as `src/<name>/tests.rs` (`query`, `lang/rust`): read the code file without its tests.
 - `docs/` — `REQUIREMENTS.md` (phases, commands, output format)
 - `src/html/` — the graph page, in small parts joined at build time by `src/html.rs`: `template.html` (skeleton), `style.css`, `js/01-data.js` … `js/10-loop.js` (run in that order). Edit only the part you need; never re-read all of it. Hard rules for these files: `rg -c 'https?://|innerHTML|<img|url\(' src/html/` must print nothing; one `/*DATA*/` (in `js/01-data.js`), `{{TITLE}}` only in `template.html`.
 - Generated, never edit: `target/`, `.claude/codemap.md`
@@ -24,7 +24,7 @@ Fast offline code-graph CLI in Rust: lets AI agents ask "where is X / who calls 
 
 ## Code map
 - `.claude/codemap.md`: every symbol as `path:line name`, plus `uses:` imports per file; refreshed automatically.
-- Find a definition: `rg '<symbol>' .claude/codemap.md`. Find callers: `~/.claude/bin/callers.sh <name>`. Then read only those lines.
+- First choice: the codegraph MCP tools (`def`, `callers`, `explain`, `affected`); they answer in a few lines. Fallback: `rg '<symbol>' .claude/codemap.md`. Then read only those lines.
 
 ## Code rules
 - Match the style of surrounding code; small functions, clear names.
@@ -34,11 +34,11 @@ Fast offline code-graph CLI in Rust: lets AI agents ask "where is X / who calls 
 - No `unwrap()` outside tests; clippy clean.
 
 ## Workflow
-- Plan, progress and decisions: `docs/PROGRESS.md` (read it at the start of a task; /handoff updates it).
+- Plan, progress and new decisions: `docs/PROGRESS.md` (read it at the start of a task; /handoff updates it). Older dated decisions and measurements: `docs/HISTORY.md` (never read it whole, search it with `rg`). Open work: `docs/TODO.md`.
 - Non-trivial change: plan first (plan mode), then small steps.
 - New behaviour or bug: write the failing test first, see it fail, then write the code.
 - Noisy test output → `test-runner` subagent; a tiny suite can run directly.
-- Searches: codemap first, then `explorer`. Before every commit: `code-reviewer` (model sonnet), fix real findings, then run it again, and repeat until it says "no remaining issues" (tell the reviewer to answer with exactly that phrase); once per finished feature, not after every small fix.
+- Searches: codegraph MCP tools first, then codemap, then `explorer`. Before every commit: Default model is `opusplan` (Opus plans, Sonnet writes); for a hard task pick `/model opus` before the first message, never mid-session (a switch re-reads the whole context uncached). `code-reviewer` runs on sonnet, given only the diff (`git diff`) plus the touched function names, not whole files. Fix real findings, then run it again on the new diff; stop when it says "no remaining issues" (tell the reviewer to answer with exactly that phrase) or after 3 rounds, whichever comes first, and list anything still open in `docs/TODO.md`. Once per finished feature, not after every small fix.
 - Context > 50% on unfinished work: /handoff, then /clear.
 
 ## Git
