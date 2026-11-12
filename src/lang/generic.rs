@@ -20,7 +20,8 @@ pub struct Config {
     pub containers: &'static [&'static str],
     /// How a call node is written (`f()`, `self.f()`, `Foo.f()`); `no_form` when not read yet.
     pub form: fn(Node, &str) -> Form,
-    /// Names a declaration introduces (most grammars: just its `name` field; `typedef A, *B;` gives two).
+    /// Names a declaration introduces
+    /// (most grammars: just its `name` field; `typedef A, *B;` gives two).
     pub name: fn(Node, &str) -> Vec<String>,
     /// Name of what a call node calls.
     pub callee: fn(Node, &str) -> Option<String>,
