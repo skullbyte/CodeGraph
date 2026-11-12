@@ -3,7 +3,7 @@
 //! no extra dependency. Field numbers are from sourcegraph/scip `scip.proto`. Untrusted input:
 //! every length is checked against the bytes left, and nothing here panics on garbage.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -219,8 +219,14 @@ fn inside_project(path: &str) -> bool {
 
 /// Apply every saved SCIP file to `index`, skipping the documents of files edited after their
 /// SCIP file was written (their positions may have moved; those calls keep the form resolver).
-/// `None` when nothing is saved. Returns the number of SCIP files read with the stats.
-pub fn reapply(root: &Path, index: &mut Index) -> Result<Option<(usize, Stats)>> {
+/// With `only`, just those files get their calls resolved again (the others keep theirs; every
+/// file still gives its definitions). `None` when nothing is saved. Returns the number of SCIP
+/// files read with the stats.
+pub fn reapply(
+    root: &Path,
+    index: &mut Index,
+    only: Option<&HashSet<String>>,
+) -> Result<Option<(usize, Stats)>> {
     let files = saved(root);
     if files.is_empty() {
         return Ok(None);
@@ -240,6 +246,11 @@ pub fn reapply(root: &Path, index: &mut Index) -> Result<Option<(usize, Stats)>>
             if !inside_project(doc.path) {
                 continue; // a hostile or foreign path: never touch the disk for it
             }
+            if only.is_some_and(|only| !only.contains(doc.path)) {
+                doc.occurrences.retain(|o| o.definition);
+                docs.push(doc);
+                continue;
+            }
             let edited = fs::metadata(root.join(doc.path))
                 .and_then(|m| m.modified())
                 .is_ok_and(|m| m > *written);
@@ -251,9 +262,18 @@ pub fn reapply(root: &Path, index: &mut Index) -> Result<Option<(usize, Stats)>>
             docs.push(doc);
         }
     }
-    let mut stats = apply(index, &docs);
+    let mut stats = apply_to(index, &docs, only);
     stats.stale_documents = stale;
     Ok(Some((files.len(), stats)))
+}
+
+/// A saved SCIP file was written after `time` (or there is no `time`): its answers are not yet
+/// in the graph saved then.
+pub fn changed_since(root: &Path, time: Option<SystemTime>) -> bool {
+    saved(root).iter().any(|p| {
+        let written = fs::metadata(p).and_then(|m| m.modified()).ok();
+        time.is_none_or(|t| written.is_some_and(|w| w > t))
+    })
 }
 
 /// A one-line warning when the exact call data is missing or older than some source files,
@@ -287,6 +307,12 @@ pub fn hint(root: &Path, index: &Index) -> Option<String> {
 /// lines the earliest unmatched call wins. Re-running replaces the earlier resolutions of the files
 /// the index covers; other files keep theirs.
 pub fn apply(index: &mut Index, docs: &[Document]) -> Stats {
+    apply_to(index, docs, None)
+}
+
+/// `apply`, touching only the files in `only` when given (all `docs` still give definitions).
+fn apply_to(index: &mut Index, docs: &[Document], only: Option<&HashSet<String>>) -> Stats {
+    let listed = |path: &str| only.is_none_or(|only| only.contains(path));
     let mut definitions: HashMap<&str, (&str, u32)> = HashMap::new();
     // A path listed twice is one file: gather its occurrences, in source order (SCIP promises none).
     let mut by_path: BTreeMap<&str, Vec<&Occurrence>> = BTreeMap::new();
@@ -298,13 +324,16 @@ pub fn apply(index: &mut Index, docs: &[Document]) -> Stats {
                     .or_insert((doc.path, o.line.saturating_add(1)));
             }
         }
+        if !listed(doc.path) {
+            continue;
+        }
         by_path
             .entry(doc.path)
             .or_default()
             .extend(&doc.occurrences);
     }
     let mut stats = Stats::default();
-    let mut covered = std::collections::HashSet::new();
+    let mut covered = HashSet::new();
     for (path, mut occurrences) in by_path {
         occurrences.sort_by_key(|o| (o.line, o.col, o.symbol, o.definition));
         occurrences.dedup_by_key(|o| (o.line, o.col, o.symbol, o.definition));
@@ -352,7 +381,7 @@ pub fn apply(index: &mut Index, docs: &[Document]) -> Stats {
         covered.insert(path);
     }
     for (path, file) in &mut index.files {
-        if !covered.contains(path.as_str()) {
+        if listed(path) && !covered.contains(path.as_str()) {
             // An earlier run may have covered it; this index says nothing, so forget those answers.
             file.resolved.clear();
             // SCIP never covers docs; their mentions are not calls to resolve.
@@ -712,7 +741,7 @@ mod tests {
     #[test]
     fn saved_files_are_applied_again_to_a_rebuilt_index() {
         let (dir, mut index) = project_with_scip();
-        let (files, stats) = reapply(dir.path(), &mut index).unwrap().unwrap();
+        let (files, stats) = reapply(dir.path(), &mut index, None).unwrap().unwrap();
         assert_eq!((files, stats.resolved, stats.stale_documents), (1, 1, 0));
         assert_eq!(resolved_calls(&index), 1);
     }
@@ -726,7 +755,7 @@ mod tests {
             .open(dir.path().join("a.rs"))
             .unwrap();
         src.set_modified(later).unwrap();
-        let (_, stats) = reapply(dir.path(), &mut index).unwrap().unwrap();
+        let (_, stats) = reapply(dir.path(), &mut index, None).unwrap().unwrap();
         assert_eq!((stats.stale_documents, stats.resolved), (1, 0));
         assert_eq!(resolved_calls(&index), 0);
     }
@@ -738,6 +767,42 @@ mod tests {
         let kept = dir.path().join(SAVED_DIR).join("rust.scip");
         fs::copy(dir.path().join("index.scip"), &kept).unwrap();
         assert_eq!(saved(dir.path()), vec![kept]);
+    }
+
+    #[test]
+    fn reapply_to_some_files_resolves_only_those_and_keeps_the_rest() {
+        let (dir, _) = project_with_scip();
+        fs::write(dir.path().join("b.rs"), "fn go() { new(); }\n").unwrap();
+        let sym = "rust-analyzer cargo p 1 m/new().";
+        let def = occurrence_bytes(field_bytes(1, &packed(&[0, 3, 6])), sym, 1);
+        let call_a = occurrence_bytes(field_bytes(1, &packed(&[1, 12, 15])), sym, 0);
+        let call_b = occurrence_bytes(field_bytes(1, &packed(&[0, 12, 15])), sym, 0);
+        let mut data = index_of("a.rs", &[def, call_a]);
+        data.extend(index_of("b.rs", &[call_b]));
+        fs::write(dir.path().join("index.scip"), data).unwrap();
+        fs::write(dir.path().join("c.rs"), "fn c() { new(); }\n").unwrap();
+        let (mut index, _) = crate::index::build(dir.path(), None).unwrap();
+        let earlier = vec![ResolvedCall {
+            call: 0,
+            target: Resolution::External,
+        }];
+        for path in ["a.rs", "c.rs"] {
+            index.files.get_mut(path).unwrap().resolved = earlier.clone();
+        }
+        let only = HashSet::from(["b.rs".to_string(), "c.rs".to_string()]);
+        reapply(dir.path(), &mut index, Some(&only))
+            .unwrap()
+            .unwrap();
+        // a.rs was not listed: its earlier answers stay. c.rs was, but no SCIP document covers it.
+        assert_eq!(index.files["a.rs"].resolved, earlier);
+        assert!(index.files["c.rs"].resolved.is_empty());
+        assert_eq!(
+            index.files["b.rs"].resolved[0].target,
+            Resolution::Def {
+                path: "a.rs".to_string(),
+                line: 1
+            }
+        );
     }
 
     #[test]
@@ -758,7 +823,7 @@ mod tests {
             .open(dir.path().join("a.rs"))
             .unwrap();
         a.set_modified(later).unwrap();
-        let (_, stats) = reapply(dir.path(), &mut index).unwrap().unwrap();
+        let (_, stats) = reapply(dir.path(), &mut index, None).unwrap().unwrap();
         assert_eq!(stats.stale_documents, 1);
         let target = &index.files["b.rs"].resolved[0].target;
         assert_eq!(
@@ -800,7 +865,7 @@ mod tests {
     fn with_nothing_saved_nothing_changes() {
         let dir = tempfile::tempdir().unwrap();
         let mut index = Index::default();
-        assert!(reapply(dir.path(), &mut index).unwrap().is_none());
+        assert!(reapply(dir.path(), &mut index, None).unwrap().is_none());
         assert!(saved(dir.path()).is_empty());
     }
 

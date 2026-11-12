@@ -1,5 +1,6 @@
 //! codegraph command line: parses arguments, calls the library, prints results.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -410,11 +411,29 @@ fn cmd_index(root: &Path) -> Result<()> {
 
 /// Full (incremental) index; the caller must hold the lock. Returns the file count and stats.
 fn reindex(root: &Path) -> Result<(usize, index::Stats)> {
+    let saved_at = fs::metadata(index::graph_path(root))
+        .and_then(|m| m.modified())
+        .ok();
     let previous = index::load(root);
     let (mut idx, mut stats) = index::build(root, previous.as_ref())?;
     // Parsing drops a file's compiler answers; saved SCIP files bring back those still valid.
-    if stats.parsed > 0 {
-        match scip::reapply(root, &mut idx) {
+    // Cached files kept theirs, so only the re-parsed ones need them, unless a SCIP file is
+    // newer than the graph (an indexer run by hand): then every file does.
+    let new_scip = scip::changed_since(root, saved_at);
+    if stats.parsed > 0 || new_scip {
+        let parsed: Option<HashSet<String>> = (stats.reused > 0 && !new_scip).then(|| {
+            idx.files
+                .values()
+                .filter(|f| {
+                    previous
+                        .as_ref()
+                        .and_then(|p| p.files.get(&f.path))
+                        .is_none_or(|p| p.hash != f.hash)
+                })
+                .map(|f| f.path.clone())
+                .collect()
+        });
+        match scip::reapply(root, &mut idx, parsed.as_ref()) {
             Ok(Some((files, _))) => stats.scip_files = files,
             Ok(None) => {}
             Err(e) => eprintln!("warning: saved SCIP data not applied: {e:#}"),
@@ -765,7 +784,7 @@ fn cmd_scip(root: &Path, file: Option<&Path>, run: bool, json: bool) -> Result<(
         if !lines.iter().any(|l| l.contains(": indexed with ")) {
             bail!("no indexer produced a SCIP file");
         }
-        match scip::reapply(root, &mut idx)? {
+        match scip::reapply(root, &mut idx, None)? {
             Some((_, stats)) => stats,
             None => bail!("the indexers wrote no SCIP file"),
         }

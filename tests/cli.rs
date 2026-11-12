@@ -111,6 +111,25 @@ fn index_applies_saved_scip_data_again_after_it_parses() {
     );
 }
 
+#[test]
+fn index_applies_a_scip_file_written_after_the_graph() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let sym = "rust-analyzer cargo p 1 m/alpha().";
+    // The indexer was run by hand after the graph was saved; every file is cached. File times
+    // move in clock ticks of a few ms: wait so the SCIP file is newer, as a real run would be.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(
+        dir.path().join("index.scip"),
+        scip_bytes("src/lib.rs", &[(0, sym, true), (2, sym, false)]),
+    )
+    .unwrap();
+    let out = stdout(&run(dir.path(), &["index"]));
+    assert!(out.contains("scip: re-applied 1 saved file(s)"), "{out}");
+    let graph = fs::read_to_string(dir.path().join(".claude/graph.json")).unwrap();
+    assert!(graph.contains("\"resolved\""), "{graph}");
+}
+
 /// `codegraph scip --run` with `path` as the only directory on PATH besides the system ones.
 fn run_scip_with_path(dir: &Path, path: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_codegraph"))
