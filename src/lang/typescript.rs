@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 use super::{Facts, caller_name, field_text, line_of, signature, text};
-use crate::model::{Call, Form, Kind, Symbol};
+use crate::model::{Call, Form, Hop, Kind, Ret, Symbol};
 
 pub fn extract(root: Node, src: &str) -> Facts {
     let mut facts = Facts::default();
@@ -253,10 +253,31 @@ fn add_item(
             line: line_of(start),
             signature: sig.clone(),
             container: container.map(String::from),
-            returns: None,
+            returns: returns_of(node, src, container),
         });
     }
     Some(sig)
+}
+
+/// What a function returns, when its annotation names one plain class: `this` is the container,
+/// `Promise<T>` is `T` (callers get it after `await`); primitives, unions, arrays and type
+/// parameters say nothing.
+fn returns_of(func: Node, src: &str, container: Option<&str>) -> Option<Ret> {
+    let annotation = func.child_by_field_name("return_type")?;
+    let mut ty = annotation.named_child(0)?;
+    let promised = ty.kind() == "generic_type" && field_text(ty, "name", src) == Some("Promise");
+    if promised {
+        ty = ty.child_by_field_name("type_arguments")?.named_child(0)?;
+    }
+    let name = match ty.kind() {
+        "this_type" => container?.to_string(),
+        _ => type_name(ty, src, &generic_names(func, src))?,
+    };
+    Some(Ret {
+        ty: name,
+        future: promised,
+        ..Default::default()
+    })
 }
 
 /// `const f = () => {}` is a function (even when not exported, so calls inside get a caller);
@@ -287,7 +308,7 @@ fn add_variable(node: Node, src: &str, facts: &mut Facts) -> Option<String> {
             line: line_of(start),
             signature: sig.clone(),
             container: None,
-            returns: None,
+            returns: function.and_then(|f| returns_of(f, src, None)),
         });
     }
     function.map(|_| caller_name(&sig))
@@ -310,11 +331,7 @@ fn add_call(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
     let Some(f) = node.child_by_field_name("function") else {
         return;
     };
-    let callee = match f.kind() {
-        "identifier" => text(f, src),
-        "member_expression" => field_text(f, "property", src).unwrap_or(""),
-        _ => "",
-    };
+    let callee = callee_name(f, src);
     if callee == "require" && f.kind() == "identifier" {
         add_require(node, src, facts);
     }
@@ -323,9 +340,49 @@ fn add_call(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
             callee: callee.to_string(),
             line: line_of(node),
             caller: ctx.enclosing.map(String::from),
-            form: call_form(f, src, ctx),
+            form: call_form(f, src, ctx, 0),
             owner: ctx.container.map(String::from),
         });
+    }
+}
+
+/// `f` -> f, `a.f` -> f; anything else is `""`.
+fn callee_name<'a>(function: Node, src: &'a str) -> &'a str {
+    match function.kind() {
+        "identifier" => text(function, src),
+        "member_expression" => field_text(function, "property", src).unwrap_or(""),
+        _ => "",
+    }
+}
+
+/// Longest call chain followed; a longer one is read as a plain method call.
+const MAX_CHAIN: usize = 32;
+
+/// The call whose result `expr` is: `a()`, `x.f()`, `(await a())`, `a()!`. Anything that is not
+/// such a call has no hop.
+fn hop_of(expr: Node, src: &str, ctx: Ctx, depth: usize) -> Option<Hop> {
+    if depth >= MAX_CHAIN {
+        return None;
+    }
+    match expr.kind() {
+        "parenthesized_expression" | "non_null_expression" => {
+            hop_of(expr.named_child(0)?, src, ctx, depth)
+        }
+        "await_expression" => {
+            let mut hop = hop_of(expr.named_child(0)?, src, ctx, depth)?;
+            hop.awaited = true;
+            Some(hop)
+        }
+        "call_expression" => {
+            let function = expr.child_by_field_name("function")?;
+            let callee = callee_name(function, src);
+            (!callee.is_empty()).then(|| Hop {
+                callee: callee.to_string(),
+                form: call_form(function, src, ctx, depth + 1),
+                ..Default::default()
+            })
+        }
+        _ => None,
     }
 }
 
@@ -341,7 +398,7 @@ fn add_class_use(node: Node, class: Node, src: &str, facts: &mut Facts, ctx: Ctx
         return;
     }
     let form = if path.len() == 1 {
-        call_form(last, src, ctx)
+        call_form(last, src, ctx, 0)
     } else {
         // `ns.A` and `ns.sub.A` are looked up in a module; through a value or `this`, A is only a name.
         let name = text(root, src);
@@ -398,7 +455,7 @@ fn add_jsx(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
 }
 
 /// How a call is written: `f()`, `this.f()`, `Foo.f()`, `ns.f()` or `value.f()`.
-fn call_form(function: Node, src: &str, ctx: Ctx) -> Form {
+fn call_form(function: Node, src: &str, ctx: Ctx, depth: usize) -> Form {
     let modules = ctx.modules;
     if function.kind() == "identifier" {
         let name = text(function, src);
@@ -436,6 +493,15 @@ fn call_form(function: Node, src: &str, ctx: Ctx) -> Form {
                 Form::Method
             }
         }
+        // `a().f()`: a method of what `a()` returns.
+        "call_expression" | "await_expression" | "parenthesized_expression" => {
+            hop_of(object, src, ctx, depth).map_or(Form::Method, |h| Form::Returned(Box::new(h)))
+        }
+        // `new Foo().f()`
+        "new_expression" => object
+            .child_by_field_name("constructor")
+            .filter(|c| c.kind() == "identifier")
+            .map_or(Form::Method, |c| Form::Type(text(c, src).to_string())),
         _ => Form::Method,
     }
 }
@@ -693,7 +759,7 @@ fn add_require(node: Node, src: &str, facts: &mut Facts) {
 #[cfg(test)]
 mod tests {
     use super::super::{Lang, extract as extract_file};
-    use crate::model::{Form, Kind};
+    use crate::model::{Form, Hop, Kind};
 
     const SRC: &str = "import { formatPrice } from './price';
 import React from 'react';
@@ -817,6 +883,52 @@ function local() { show(1); }
     }
 
     #[test]
+    fn return_types_name_a_plain_class_this_or_a_promised_class() {
+        let src = "class A {
+  me(): this { return this; }
+  wrap(): ZodOptional<this> {}
+  async load(): Promise<Repo> {}
+  n(): string {}
+  g<T>(): T {}
+  u(): A | B {}
+  none() {}
+}
+interface I { opt(): this; }
+function make(): ns.Builder {}
+export function over(a: string): One;
+export function over(a: number): Two;
+export function over(a: any) {}
+export const mk = (): Thing => new Thing();
+";
+        let facts = extract_file(Lang::TypeScript, src).unwrap();
+        let got: Vec<_> = facts
+            .symbols
+            .iter()
+            .filter(|s| s.kind == Kind::Fn)
+            .map(|s| {
+                let r = s.returns.as_ref();
+                (s.name.as_str(), r.map(|r| (r.ty.as_str(), r.future)))
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("me", Some(("A", false))),
+                ("wrap", Some(("ZodOptional", false))),
+                ("load", Some(("Repo", true))),
+                ("n", None),
+                ("g", None),
+                ("u", None),
+                ("none", None),
+                ("opt", Some(("I", false))),
+                ("make", Some(("Builder", false))),
+                ("over", Some(("One", false))),
+                ("mk", Some(("Thing", false))),
+            ]
+        );
+    }
+
+    #[test]
     fn overloads_are_one_symbol_at_the_first_signature() {
         let src = "export function f(a: string): A;\nexport function f(a: number): B;\nexport function f(a: any) { return a; }\n";
         assert_eq!(members(src), vec![sym("f", None, 1)]);
@@ -927,6 +1039,41 @@ function h() { x.z(); }
 
     fn method(callee: &str) -> (String, Form) {
         (callee.into(), Form::Method)
+    }
+
+    fn hop(callee: &str, form: Form, awaited: bool) -> Form {
+        Form::Returned(Box::new(Hop {
+            callee: callee.into(),
+            form,
+            awaited,
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn a_method_on_a_call_result_is_a_chain_and_new_names_its_class() {
+        let src = "import * as z from './z';
+async function f() {
+  z.string().optional();
+  (await load()).run();
+  a()!.b();
+  new Foo().go();
+}
+";
+        let z = || Form::Module("z".into());
+        assert_eq!(
+            call_forms(src),
+            vec![
+                ("optional".to_string(), hop("string", z(), false)),
+                ("string".into(), z()),
+                ("run".into(), hop("load", Form::Bare, true)),
+                ("load".into(), Form::Bare),
+                ("b".into(), hop("a", Form::Bare, false)),
+                ("a".into(), Form::Bare),
+                ("go".into(), Form::Type("Foo".into())),
+                ("Foo".into(), Form::Bare),
+            ]
+        );
     }
 
     #[test]
