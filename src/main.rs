@@ -102,6 +102,8 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         top: usize,
     },
+    /// Totals (files, symbols, calls, clusters) and whether the SCIP data is missing or stale.
+    Stats,
     /// Write .claude/GRAPH_REPORT.md: key modules, hubs, surprising links, communities.
     Report,
     /// Write .claude/graph.html: one offline page with an interactive map of the files.
@@ -331,6 +333,15 @@ fn run(cli: Cli) -> Result<()> {
         ),
         Command::Hubs { top } => {
             print_results(&query::hubs(&load(&cli.dir)?, *top), cli.json, Hub::text)
+        }
+        Command::Stats => {
+            let idx = load(&cli.dir)?;
+            let clusters = community::detect(&community::file_graph(&idx)).len();
+            print_results(
+                &serve::stats_lines(&cli.dir, &idx, clusters),
+                cli.json,
+                String::clone,
+            )
         }
         Command::Report => cmd_report(&cli.dir, cli.json),
         Command::Html => cmd_html(&cli.dir),

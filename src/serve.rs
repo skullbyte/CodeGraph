@@ -17,6 +17,7 @@ use crate::glossary;
 use crate::index;
 use crate::model::Index;
 use crate::query;
+use crate::scip;
 use crate::semantic;
 use crate::tour;
 
@@ -172,7 +173,7 @@ impl Server {
                 let file = text(args, "file")?.to_string();
                 community_of(loaded, &file)
             }
-            _ => stats(loaded),
+            _ => stats(&root, loaded),
         };
         Ok(capped(lines, limit))
     }
@@ -445,14 +446,21 @@ fn community_of(loaded: &mut Loaded, file: &str) -> Vec<String> {
     }
 }
 
-fn stats(loaded: &mut Loaded) -> Vec<String> {
-    let files = loaded.index.files.len();
-    let (symbols, calls) = loaded.index.code_totals();
-    let resolved: usize = loaded.index.files.values().map(|f| f.resolved.len()).sum();
+fn stats(root: &Path, loaded: &mut Loaded) -> Vec<String> {
     let clusters = communities(loaded).len();
-    vec![format!(
+    stats_lines(root, &loaded.index, clusters)
+}
+
+/// The totals line, plus a hint when the SCIP data is missing or stale.
+pub fn stats_lines(root: &Path, index: &Index, clusters: usize) -> Vec<String> {
+    let files = index.files.len();
+    let (symbols, calls) = index.code_totals();
+    let resolved: usize = index.files.values().map(|f| f.resolved.len()).sum();
+    let mut lines = vec![format!(
         "{files} files, {symbols} symbols, {calls} calls ({resolved} resolved by SCIP), {clusters} clusters"
-    )]
+    )];
+    lines.extend(scip::hint(root, index));
+    lines
 }
 
 fn reply(id: Value, result: Value) -> String {
@@ -711,11 +719,9 @@ mod tests {
                 .0
                 .contains("src/lib.rs")
         );
-        assert!(
-            call(&mut server, "stats", json!({}))
-                .0
-                .starts_with("1 files, 2 symbols, 1 calls")
-        );
+        let stats = call(&mut server, "stats", json!({})).0;
+        assert!(stats.starts_with("1 files, 2 symbols, 1 calls"), "{stats}");
+        assert!(stats.contains("\nno SCIP data"), "{stats}");
         assert_eq!(
             call(&mut server, "def", json!({ "name": "zzz" })),
             ("no results".into(), false)

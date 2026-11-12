@@ -84,7 +84,7 @@ New decisions go here, one dated line each; older ones are in `docs/HISTORY.md` 
 - 2026-11-12 release profile tuning (fat LTO, codegen-units=1) measured: -1% index, -6% callers: not worth the build time; `strip` only saves 3 MB; never `panic = "abort"` (PDF reader uses catch_unwind)
 
 ## Gotchas
-- `cargo install` without `--locked` ignores Cargo.lock (pulled tree-sitter 0.27.2): use `just install`. `stats` is an MCP tool only, there is no `codegraph stats` CLI command (TODO B2)
+- `cargo install` without `--locked` ignores Cargo.lock (pulled tree-sitter 0.27.2): use `just install`. `codegraph stats` (and MCP `stats`) warns when SCIP data is missing or stale
 - Pushing: ask the user to run `! git push` (Claude is denied, no `gh` login). Check `git remote -v` after any `set-url`: a stray trailing `.` once broke the URL
 - After `cargo fmt`, a literal `str.replace` on code can silently miss (fmt reflows lists/calls): twice a reviewed fix was not applied. Check with `rg` that every scripted edit landed; prefer slices over fixed-size arrays for name lists
 - SCIP indexers live in ~/.local/bin (scip-go, scip-java, scip-clang, scip-ruby), npm -g (scip-typescript, scip-python), ~/.dotnet/tools (scip-dotnet, not on PATH). Run indexers in the repo root; for zod run in `bench/real/zod/packages/zod` (`scip-typescript index --no-progress-bar`; `--pnpm-workspaces` fails). After every `cargo install` the fingerprint changes: re-run `codegraph index && codegraph scip` before `codegraph precision` (tokio: `cd bench/tokio`)

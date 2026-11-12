@@ -256,6 +256,32 @@ pub fn reapply(root: &Path, index: &mut Index) -> Result<Option<(usize, Stats)>>
     Ok(Some((files.len(), stats)))
 }
 
+/// A one-line warning when the exact call data is missing or older than some source files,
+/// with the command that fixes it; `None` when it is fresh.
+pub fn hint(root: &Path, index: &Index) -> Option<String> {
+    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let Some(written) = saved(root).iter().filter_map(|p| modified(p)).max() else {
+        let resolved = index.files.values().any(|f| !f.resolved.is_empty());
+        let calls = index.files.values().any(|f| !f.calls.is_empty());
+        return (calls && !resolved).then(|| {
+            "no SCIP data: calls are matched by name; run `codegraph scip --run` for exact ones"
+                .to_string()
+        });
+    };
+    let edited = index
+        .files
+        .values()
+        .filter(|f| !f.calls.is_empty())
+        .filter(|f| modified(&root.join(&f.path)).is_some_and(|m| m > written))
+        .count();
+    (edited > 0).then(|| {
+        let s = if edited == 1 { "" } else { "s" };
+        format!(
+            "SCIP data is stale: {edited} file{s} edited since; run `codegraph scip --run` again"
+        )
+    })
+}
+
 /// Attach to every call of `index` what the SCIP `docs` say it refers to. A call is matched to the
 /// identifier occurrence with the same name on its line, or up to `CHAIN_LINES` below it; on equal
 /// lines the earliest unmatched call wins. Re-running replaces the earlier resolutions of the files
@@ -1176,5 +1202,35 @@ mod tests {
         }];
         apply(&mut index, &again);
         assert!(index.files["a.rs"].resolved.is_empty());
+    }
+
+    #[test]
+    fn hint_says_when_there_is_no_scip_data() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn a() { b(); }\n").unwrap();
+        let (index, _) = crate::index::build(dir.path(), None).unwrap();
+        let hint = hint(dir.path(), &index).unwrap();
+        assert!(hint.contains("no SCIP data"), "{hint}");
+    }
+
+    #[test]
+    fn hint_is_quiet_when_the_scip_data_is_fresh() {
+        let (dir, _) = project_with_scip();
+        let (index, _) = crate::index::build(dir.path(), None).unwrap();
+        assert_eq!(hint(dir.path(), &index), None);
+    }
+
+    #[test]
+    fn hint_counts_files_edited_after_the_scip_data() {
+        let (dir, _) = project_with_scip();
+        let (index, _) = crate::index::build(dir.path(), None).unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(60);
+        let a = fs::File::options()
+            .write(true)
+            .open(dir.path().join("a.rs"))
+            .unwrap();
+        a.set_modified(later).unwrap();
+        let hint = hint(dir.path(), &index).unwrap();
+        assert!(hint.contains("1 file edited"), "{hint}");
     }
 }

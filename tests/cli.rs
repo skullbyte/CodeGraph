@@ -66,6 +66,15 @@ fn def_and_callers_print_one_result_per_line() {
 }
 
 #[test]
+fn stats_prints_totals_and_the_scip_hint() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let out = stdout(&run(dir.path(), &["stats"]));
+    assert!(out.starts_with("2 files, 3 symbols, 2 calls"), "{out}");
+    assert!(out.contains("\nno SCIP data"), "{out}");
+}
+
+#[test]
 fn def_flag_picks_one_definition_or_fails_with_the_choices() {
     let dir = project();
     run(dir.path(), &["index"]);
