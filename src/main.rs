@@ -439,7 +439,17 @@ fn reindex(root: &Path) -> Result<(usize, index::Stats)> {
             Err(e) => eprintln!("warning: saved SCIP data not applied: {e:#}"),
         }
     }
-    write_outputs(root, &mut idx)?;
+    // Rewriting an unchanged graph is a third of a cached run. A newer SCIP file always writes,
+    // or its stamp would stay newer than graph.json and force a full re-apply on every run.
+    let unchanged = previous.is_some_and(|p| p.files == idx.files && p.aliases == idx.aliases)
+        && !new_scip
+        && index::delta_len(root) == 0
+        && ["graph.bin", "graph.json", "codemap.md"]
+            .iter()
+            .all(|name| root.join(".claude").join(name).is_file());
+    if !unchanged {
+        write_outputs(root, &mut idx)?;
+    }
     Ok((idx.files.len(), stats))
 }
 

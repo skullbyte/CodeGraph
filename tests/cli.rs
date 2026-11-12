@@ -52,6 +52,60 @@ fn index_writes_codemap_and_graph() {
 }
 
 #[test]
+fn index_with_nothing_changed_writes_nothing_unless_an_output_is_missing() {
+    let dir = project();
+    run(dir.path(), &["index"]);
+    let claude = dir.path().join(".claude");
+    let written = |name: &str| fs::metadata(claude.join(name)).unwrap().modified().unwrap();
+    let before = ["graph.bin", "graph.json", "codemap.md"].map(written);
+    // File times move in clock ticks of a few ms: wait so a rewrite would show.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    run(dir.path(), &["index"]);
+    assert_eq!(
+        ["graph.bin", "graph.json", "codemap.md"].map(written),
+        before
+    );
+
+    fs::remove_file(claude.join("codemap.md")).unwrap();
+    run(dir.path(), &["index"]);
+    assert!(claude.join("codemap.md").is_file());
+
+    // A pending `update` log is folded into the graph even though the files match it.
+    fs::write(dir.path().join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    let lib = dir.path().join("src/lib.rs");
+    run(dir.path(), &["update", lib.to_str().unwrap()]);
+    assert!(claude.join("delta.bin").is_file());
+    run(dir.path(), &["index"]);
+    assert!(!claude.join("delta.bin").exists());
+
+    // A SCIP file newer than graph.json is written down, even when it changes no answer.
+    let sym = "rust-analyzer cargo p 1 m/alpha().";
+    fs::write(
+        dir.path().join("index.scip"),
+        scip_bytes("src/lib.rs", &[(0, sym, true)]),
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    run(dir.path(), &["index"]);
+    let json_before = written("graph.json");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::File::options()
+        .write(true)
+        .open(dir.path().join("index.scip"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now())
+        .unwrap();
+    run(dir.path(), &["index"]);
+    assert!(written("graph.json") > json_before);
+
+    // A deleted source file changes the graph.
+    fs::remove_file(dir.path().join("src/app.ts")).unwrap();
+    run(dir.path(), &["index"]);
+    let graph = fs::read_to_string(claude.join("graph.json")).unwrap();
+    assert!(!graph.contains("app.ts"));
+}
+
+#[test]
 fn def_and_callers_print_one_result_per_line() {
     let dir = project();
     run(dir.path(), &["index"]);
