@@ -1,8 +1,8 @@
 # codegraph progress
 
 ## Now
-Session 2026-11-12 (audit + workflow). `just check` green (489 lib + 41 cli tests). NOT committed yet: CLAUDE.md, justfile (`just install`), docs/PROGRESS.md, new docs/HISTORY.md + docs/TODO.md, src/query.rs + src/query/tests.rs, src/lang/rust.rs + src/lang/rust/tests.rs (tests moved out, no behaviour change), src/lang/generic.rs (comment reflow).
-Next step: `/commit` those (code-reviewer on sonnet, diff only), then pick from `docs/TODO.md` (A3, B2, C0 first; hard ones E1-E3 with `/model opus` chosen before starting).
+Session 2026-11-12: all committed (up to c69f928), `just check` green (493 lib + 43 cli tests). Done: A3, B2 (`codegraph stats` + SCIP hint), C0 part 1 (partial SCIP re-apply).
+Next step: from `docs/TODO.md`: rest of C0 (cached `index` 48 ms on tokio), then C1-C3 (C1/C2 need the user's format decision); hard ones E1-E3 with `/model opus` chosen before starting.
 Scores (tokio form): right 64% / wrong 0% / narrowed 22% / lost 0%; this repo 97% right; zod 8%. SCIP on this repo: 14368 of 14885 calls resolved (2026-11-12).
 `origin` = github.com/skullbyte/CodeGraph; pushed up to 9ef627d; later commits not pushed (user pushes with `!`).
 Rules: tests first, model `opusplan` (opus only for hard tasks, chosen before the first message), `code-reviewer` (sonnet, diff only, max 3 rounds) until "no remaining issues", commit by file name, no AI attribution, never push unless asked, `cargo add` only by the user with `!`.
