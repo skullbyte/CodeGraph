@@ -175,14 +175,17 @@ fn collect_specifiers(named: Node, src: &str, stem: &str, names: &mut HashMap<St
 }
 
 /// `./price` -> `price`, `../core/index.js` -> `core`, `zod/v3` -> `v3`, `@scope/pkg` -> `pkg`:
-/// the last name of the path that is not `index`.
+/// the last name of the path that is not `index`. A path with no such name (`../../index.js`)
+/// is its own key: it matches no file name, only the import itself.
 pub(crate) fn module_stem(specifier: &str) -> Option<String> {
     let path = specifier.trim_matches(['\'', '"', '`']);
     let mut parts = path.rsplit('/');
     let file = parts.next()?;
     let stem = file.split('.').next().unwrap_or("");
     let name = if stem == "index" {
-        parts.find(|p| !matches!(*p, "." | ".." | ""))?
+        parts
+            .find(|p| !matches!(*p, "." | ".." | ""))
+            .unwrap_or(path)
     } else {
         stem
     };
@@ -1050,6 +1053,15 @@ function local() { show(1); }
             .iter()
             .map(|s| (s.name.clone(), s.container.clone(), s.line))
             .collect()
+    }
+
+    #[test]
+    fn a_namespace_import_of_a_bare_index_is_still_a_module() {
+        let got = call_forms("import * as z from '../../index.js';\nz.string();\n");
+        assert_eq!(
+            got,
+            vec![("string".to_string(), Form::Module("../../index.js".into()))]
+        );
     }
 
     #[test]
