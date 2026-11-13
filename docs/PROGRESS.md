@@ -1,10 +1,9 @@
 # codegraph progress
 
 ## Now
-Goal: precision first (user). All work committed and pushed (origin/main = 42e2d4b, 2026-11-14). User pushes with `! git push`.
-Done 2026-11-13/14: rules split (26e9973), E1 TS chains (17e58c6), E1b package names + re-exports `src/tspath.rs` (d6ac29b), bare-index namespace (a04b2c9), Rust inherent-before-trait (bf425b9), TS namespaces imported by name (5b71bd2).
-2026-11-14 later: TS function fields as methods + v3 `const a = B.c; export { a as n }` (E8 part).
-Scores (form strategy vs SCIP): zod 77% right / 2% wrong (was 8/8); tokio 67% / 0% (was 64/0); this repo 96% / 0%. `just check` green: 525 lib + 44 cli. Binary installed.
+Goal: precision first (user). All committed; 1783a54 + this handoff NOT pushed yet (origin/main = 3f708ad). User pushes with `! git push`.
+Done 2026-11-13/14: rules split (26e9973), E1 TS chains (17e58c6), E1b package names + re-exports `src/tspath.rs` (d6ac29b), bare-index namespace (a04b2c9), Rust inherent-before-trait (bf425b9), TS namespaces imported by name (5b71bd2), TS function fields as methods + v3 `const a = B.c; export { a as n }` (1783a54, E8 part; reviewer stopped at round 3, leftovers in TODO E8).
+Scores (form strategy vs SCIP): zod 77% right / 2% wrong (was 70/1; chains 59 -> 75%); tokio 67% / 0%; this repo 96% / 0%. `just check` green: 527 lib + 44 cli. Binary installed.
 Measure: zod `cd bench/real/zod/packages/zod && codegraph index && codegraph scip && codegraph precision`; tokio `cd bench/tokio && codegraph index && codegraph precision` (saved SCIP re-applied); misses: `codegraph precision --misses 100000 | rg '^miss <form>'`.
 Next step (pick one, all in TODO E): tokio method row (2323 calls, 7% right: closure params, macro bodies = E3, fields of fields); tokio chains 22% narrowed; zod: constrained generics (`T extends z.ZodType`, E8) and the method row (446 calls, 17% right). E3 (macro_rules) is the biggest single Rust item: plan mode first.
 Rules: tests first, `code-reviewer` (sonnet, diff only, max 3 rounds) until "no remaining issues", commit by file name, no AI attribution, never push, `cargo add` only by the user.
@@ -93,6 +92,8 @@ New decisions go here, one dated line each; older ones are in `docs/HISTORY.md` 
 - 2026-11-14 TS: a type returned by a function is first the one declared in that function's file (`members_up(.., home)`); same-named types elsewhere are rivals
 - 2026-11-14 Rust: inherent method hides a trait-impl method of the same impl target (same file) at the same or later receiver step, only for a known receiver type (never `x.f()`: may be `Pin<&mut T>`)
 - 2026-11-14 TS: `import { z } from "pkg"` is `Module("pkg::z")` only as a plain receiver; not a namespace -> read as `x.f()`
+- 2026-11-14 TS: a class field holding an arrow/function is an `Fn` member; its caller name is the field text up to its name, decorators cut (`static create`, like methods); a decorator call inside counts for that member, like decorated methods
+- 2026-11-14 TS: `const a = B.c; export { a as n }` adds a top-level `Const` `n` (line of the const) returning `B.c`'s type from the same file; kept even with no return type so `m.n()` still finds the file. Done in the extractor, not `tspath` (no format change)
 
 ## Gotchas
 - `cargo install` without `--locked` ignores Cargo.lock (pulled tree-sitter 0.27.2): use `just install`. `codegraph stats` (and MCP `stats`) warns when SCIP data is missing or stale
