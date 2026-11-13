@@ -46,7 +46,7 @@ Rules stay the same: failing test first, `just check`, `code-reviewer` loop, no 
 - [ ] E4. Fields of generic structs; tuple patterns after `..`.
 - [ ] E5. Forms for Java/Kotlin/Go/C#/C++/Ruby/PHP/Swift. Blocked: scoring needs SCIP indexers that run the project's build; the user must OK each (`scip-java`, `scip-go`, `scip-clang`, `scip-dotnet`).
 - [ ] E6. File explain ("ask about a file"), promised 2026-11-01.
-- [ ] E8. TS: a parameter typed by a constrained generic (`schema: T`, `T extends z.ZodType`) could use the constraint; v3-style `export { stringType as string }` (local renamed export) is not followed by `src/tspath.rs`.
+- [~] E8. TS: a parameter typed by a constrained generic (`schema: T`, `T extends z.ZodType`) could use the constraint. Done 2026-11-14: class fields holding a function are `Fn` members (`static create = (..): A =>`), and `const a = B.c; export { a as n }` adds a `Const` `n` returning `B.c`'s type (zod form 70 -> 77% right, chains 59 -> 75%, chain wrong 0 -> 1%, ~77 calls not inspected: `--misses` truncates the picked list). Left from review: no test for `export const a = B.c` + rename, `#private` and string-named function fields are skipped; local renamed export of a plain function (`function f; export { f as g }`) is still not followed.
 - [ ] E7. Stemming for `query` ("notifies" should match `notify`).
 
 ## F. Graphify parity (39/118 = 33%), in the user's order

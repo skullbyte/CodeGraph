@@ -19,7 +19,83 @@ pub fn extract(root: Node, src: &str) -> Facts {
         fields: None,
     };
     visit(root, src, &mut facts, ctx);
+    add_renamed_method_aliases(root, src, &mut facts);
     facts
+}
+
+/// zod v3 style: `const stringType = ZodString.create; export { stringType as string }`. The
+/// exported name becomes a top-level `Const` at the alias's line, returning what `create` of the
+/// same file's `ZodString` returns, so `z.string().optional()` can follow the chain. Run after the
+/// walk, so an export written above the `const` is seen too.
+fn add_renamed_method_aliases(root: Node, src: &str, facts: &mut Facts) {
+    // alias -> (class, method, line), for top-level `const a = B.c` only.
+    let mut aliases: HashMap<&str, (&str, &str, u32)> = HashMap::new();
+    let mut renames: Vec<(&str, &str)> = Vec::new();
+    let mut cursor = root.walk();
+    for stmt in root.named_children(&mut cursor) {
+        match stmt.kind() {
+            "lexical_declaration" => {
+                let mut c = stmt.walk();
+                for decl in stmt.named_children(&mut c) {
+                    if let Some(found) = method_alias(decl, src) {
+                        aliases.insert(found.0, (found.1, found.2, line_of(stmt)));
+                    }
+                }
+            }
+            "export_statement" if stmt.child_by_field_name("source").is_none() => {
+                let mut c = stmt.walk();
+                for clause in stmt
+                    .named_children(&mut c)
+                    .filter(|n| n.kind() == "export_clause")
+                {
+                    let mut s = clause.walk();
+                    for one in clause.named_children(&mut s) {
+                        if let (Some(name), Some(alias)) =
+                            (field_text(one, "name", src), field_text(one, "alias", src))
+                        {
+                            renames.push((name, alias));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (name, alias) in renames {
+        let Some(&(class, method, line)) = aliases.get(name) else {
+            continue;
+        };
+        let returns = facts
+            .symbols
+            .iter()
+            .filter(|s| s.name == method && s.container.as_deref() == Some(class))
+            .find_map(|s| s.returns.clone());
+        // Kept without a return type too: `z.u()` still finds the file through the name.
+        facts.symbols.push(Symbol {
+            name: alias.trim_matches(['\'', '"']).to_string(),
+            kind: Kind::Const,
+            line,
+            signature: format!("const {name} = {class}.{method}"),
+            container: None,
+            returns,
+            bases: Vec::new(),
+        });
+    }
+}
+
+/// `a = B.c` (a declarator whose value is a member of a plain name): `(a, B, c)`.
+fn method_alias<'s>(decl: Node, src: &'s str) -> Option<(&'s str, &'s str, &'s str)> {
+    let name = decl
+        .child_by_field_name("name")
+        .filter(|n| n.kind() == "identifier")?;
+    let value = decl
+        .child_by_field_name("value")
+        .filter(|v| v.kind() == "member_expression")?;
+    let object = value
+        .child_by_field_name("object")
+        .filter(|o| o.kind() == "identifier")?;
+    let property = value.child_by_field_name("property")?;
+    Some((text(name, src), text(object, src), text(property, src)))
 }
 
 /// Where the walk is: the innermost function (`enclosing`), the class or interface whose members
@@ -87,6 +163,7 @@ fn visit(node: Node, src: &str, facts: &mut Facts, ctx: Ctx) {
         "type_alias_declaration" => _ = add_item(node, Kind::Type, src, facts, None),
         "enum_declaration" => _ = add_item(node, Kind::Enum, src, facts, None),
         "variable_declarator" => own = add_variable(node, src, facts),
+        "public_field_definition" => own = add_function_field(node, src, facts, ctx.container),
         "import_statement" | "export_statement" => add_import(node, src, facts),
         "call_expression" => add_call(node, src, facts, ctx),
         "new_expression" => {
@@ -406,6 +483,42 @@ fn add_variable(node: Node, src: &str, facts: &mut Facts) -> Option<String> {
         });
     }
     function.map(|_| caller_name(&sig))
+}
+
+/// A class field holding a function (`static create = (..): A => ..`, `handle = () => {}`) is a
+/// method of the class. Returns the caller name, so calls inside belong to it.
+fn add_function_field(
+    node: Node,
+    src: &str,
+    facts: &mut Facts,
+    container: Option<&str>,
+) -> Option<String> {
+    let container = container?;
+    let name = node
+        .child_by_field_name("name")
+        .filter(|n| n.kind() == "property_identifier")?;
+    let function = node
+        .child_by_field_name("value")
+        .filter(|v| matches!(v.kind(), "arrow_function" | "function_expression"))?;
+    let sig = signature(node, function.child_by_field_name("body"), src);
+    facts.symbols.push(Symbol {
+        name: text(name, src).to_string(),
+        kind: Kind::Fn,
+        line: line_of(node),
+        signature: sig.clone(),
+        container: Some(container.to_string()),
+        returns: returns_of(function, src, Some(container)),
+        bases: Vec::new(),
+    });
+    // Shown up to the name (`static create`, `handle`), like a method; a type annotation such as
+    // `handle: () => void = ..` must not leak in, nor a decorator (`@HostListener('x') handle`).
+    let mut cursor = node.walk();
+    let start = node
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "decorator")
+        .last()
+        .map_or(node.start_byte(), |d| d.end_byte());
+    Some(src[start..name.end_byte()].trim().to_string())
 }
 
 /// Keep every import specifier as written; whether it is a local file, an alias or a package
@@ -1260,6 +1373,79 @@ class E {}
     fn abstract_methods_are_symbols_of_their_class() {
         let got = members("abstract class B {\n  abstract go(): void;\n}\n");
         assert_eq!(got, vec![sym("B", None, 1), sym("go", Some("B"), 2)]);
+    }
+
+    #[test]
+    fn a_class_field_holding_a_function_is_a_method_and_calls_inside_it_belong_to_it() {
+        let src = "class A {
+  static create = (p?: P): A => build(p);
+  handle = function () { go(); };
+  typed: () => void = () => { stop(); };
+  @HostListener('x') on = () => { fire(); };
+  count = 0;
+}
+";
+        let facts = extract_file(Lang::TypeScript, src).unwrap();
+        let methods: Vec<_> = facts
+            .symbols
+            .iter()
+            .filter(|s| s.container.as_deref() == Some("A"))
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    s.kind,
+                    s.returns.as_ref().map(|r| r.ty.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            methods,
+            vec![
+                ("create", Kind::Fn, Some("A")),
+                ("handle", Kind::Fn, None),
+                ("typed", Kind::Fn, None),
+                ("on", Kind::Fn, None)
+            ]
+        );
+        let callers: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.callee.as_str(), c.caller.as_deref()))
+            .collect();
+        assert_eq!(
+            callers,
+            vec![
+                ("build", Some("static create")),
+                ("go", Some("handle")),
+                ("stop", Some("typed")),
+                ("HostListener", Some("on")), // like a decorated method
+                ("fire", Some("on"))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_renamed_export_of_a_static_method_alias_is_a_symbol_with_its_return_type() {
+        // zod v3: `const stringType = ZodString.create; export { stringType as string }`.
+        let src = "export { stringType as string, other as o, plain as p, unknownType as u };
+class ZodString {
+  static create = (params?: P): ZodString => new ZodString();
+}
+const stringType = ZodString.create;
+const unknownType = Missing.create;
+const plain = 3;
+";
+        let facts = extract_file(Lang::TypeScript, src).unwrap();
+        let got: Vec<_> = facts
+            .symbols
+            .iter()
+            .filter(|s| s.container.is_none() && s.kind == Kind::Const)
+            .map(|s| {
+                let ty = s.returns.as_ref().map(|r| r.ty.as_str());
+                (s.name.as_str(), s.line, ty)
+            })
+            .collect();
+        assert_eq!(got, vec![("string", 5, Some("ZodString")), ("u", 6, None)]);
     }
 
     #[test]

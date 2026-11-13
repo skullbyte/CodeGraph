@@ -3,9 +3,10 @@
 ## Now
 Goal: precision first (user). All work committed and pushed (origin/main = 42e2d4b, 2026-11-14). User pushes with `! git push`.
 Done 2026-11-13/14: rules split (26e9973), E1 TS chains (17e58c6), E1b package names + re-exports `src/tspath.rs` (d6ac29b), bare-index namespace (a04b2c9), Rust inherent-before-trait (bf425b9), TS namespaces imported by name (5b71bd2).
-Scores (form strategy vs SCIP): zod 70% right / 1% wrong (was 8/8); tokio 67% / 0% (was 64/0); this repo 96% / 0%. `just check` green: 525 lib + 44 cli. Binary installed.
+2026-11-14 later: TS function fields as methods + v3 `const a = B.c; export { a as n }` (E8 part).
+Scores (form strategy vs SCIP): zod 77% right / 2% wrong (was 8/8); tokio 67% / 0% (was 64/0); this repo 96% / 0%. `just check` green: 525 lib + 44 cli. Binary installed.
 Measure: zod `cd bench/real/zod/packages/zod && codegraph index && codegraph scip && codegraph precision`; tokio `cd bench/tokio && codegraph index && codegraph precision` (saved SCIP re-applied); misses: `codegraph precision --misses 100000 | rg '^miss <form>'`.
-Next step (pick one, all in TODO E): tokio method row (2323 calls, 7% right: closure params, macro bodies = E3, fields of fields); tokio chains 22% narrowed; zod v3 renamed local exports (`const stringType = ..; export { stringType as string }`) and constrained generics (`T extends z.ZodType`, E8). E3 (macro_rules) is the biggest single Rust item: plan mode first.
+Next step (pick one, all in TODO E): tokio method row (2323 calls, 7% right: closure params, macro bodies = E3, fields of fields); tokio chains 22% narrowed; zod: constrained generics (`T extends z.ZodType`, E8) and the method row (446 calls, 17% right). E3 (macro_rules) is the biggest single Rust item: plan mode first.
 Rules: tests first, `code-reviewer` (sonnet, diff only, max 3 rounds) until "no remaining issues", commit by file name, no AI attribution, never push, `cargo add` only by the user.
 
 ## Checklist
