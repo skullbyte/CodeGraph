@@ -1,15 +1,12 @@
 # codegraph progress
 
 ## Now
-Task: E1, plan `~/.claude/plans/refactored-cooking-umbrella.md` (approved 2026-11-12, 4 steps). Steps 1+2 committed in bd020c2 (not pushed): TS `returns_of` + `hop_of`/`Form::Returned` in `call_form`; `just check` green (495 lib + 44 cli).
-zod after 1+2: form still 8% right / 8% wrong; new "chain" row 3866 calls: 6% right, 0% wrong, 94% narrowed (needs step 4, inheritance).
-Session 2026-11-14 (autonomous, user asked to continue unsupervised): committed E1b (d6ac29b), bare-index namespace fix (a04b2c9), Rust inherent-before-trait methods (bf425b9), TS namespaces imported by name (this commit). Not pushed.
-zod: form right 70% / wrong 1% (E1 start 8/8; `import { z } from "zod/v4"` namespaces now followed). tokio: 67% / 0% (was 64/0; chains 56 -> 66%). This repo 96/0.
-Rust rule: `Resolver::inherent_first` + `receivers_of`/`receiver_step` (scope.rs): an inherent method hides a trait-impl method of the same impl target (same file) reached at the same or a later receiver step; only for a known receiver type (Type/SelfRef/typed chain).
-Next step: remaining tokio misses: method row (2323 calls, 7% right: closure params, macro bodies = E3, fields of fields), chain narrowed 22%; zod: v3 renamed local exports (`export { stringType as string }`), generic params with constraints (`T extends z.ZodType`).
-Scores (tokio form): right 64% / wrong 0% / narrowed 22% / lost 0%; this repo 97% right; zod 8%. SCIP on this repo: 14454 of 14973 calls resolved (2026-11-12).
-`origin` = github.com/skullbyte/CodeGraph; `main` tracks `origin/main`, pushed up to 98b3143, bd020c2 local only (user pushes with `! git push`).
-Rules: tests first, model `opusplan` (opus only for hard tasks, chosen before the first message), `code-reviewer` (sonnet, diff only, max 3 rounds) until "no remaining issues", commit by file name, no AI attribution, never push unless asked, `cargo add` only by the user with `!`.
+Goal: precision first (user). All work committed, NOT pushed: main is 13 commits ahead of origin (98b3143); last 29ec4ac. User pushes with `! git push`.
+Done 2026-11-13/14: rules split (26e9973), E1 TS chains (17e58c6), E1b package names + re-exports `src/tspath.rs` (d6ac29b), bare-index namespace (a04b2c9), Rust inherent-before-trait (bf425b9), TS namespaces imported by name (5b71bd2).
+Scores (form strategy vs SCIP): zod 70% right / 1% wrong (was 8/8); tokio 67% / 0% (was 64/0); this repo 96% / 0%. `just check` green: 525 lib + 44 cli. Binary installed.
+Measure: zod `cd bench/real/zod/packages/zod && codegraph index && codegraph scip && codegraph precision`; tokio `cd bench/tokio && codegraph index && codegraph precision` (saved SCIP re-applied); misses: `codegraph precision --misses 100000 | rg '^miss <form>'`.
+Next step (pick one, all in TODO E): tokio method row (2323 calls, 7% right: closure params, macro bodies = E3, fields of fields); tokio chains 22% narrowed; zod v3 renamed local exports (`const stringType = ..; export { stringType as string }`) and constrained generics (`T extends z.ZodType`, E8). E3 (macro_rules) is the biggest single Rust item: plan mode first.
+Rules: tests first, `code-reviewer` (sonnet, diff only, max 3 rounds) until "no remaining issues", commit by file name, no AI attribution, never push, `cargo add` only by the user.
 
 ## Checklist
 - [x] Phases 1-4 (done 2026-10-27..30): core engine, communities + report + benchmark, html/mermaid/obsidian, 9 languages (Rust, TS/TSX, JS, Python, Java, C#, Go, C, C++)
@@ -90,6 +87,11 @@ New decisions go here, one dated line each; older ones are in `docs/HISTORY.md` 
 - 2026-11-12 E1 includes inheritance (`Symbol.bases`, resolver walks bases when a type has no member of that name): zod misses show `parse` lives on base `ZodType`, so chains alone gain nothing (measured)
 - 2026-11-12 E1 out of scope, to TODO: `Module("util")` matching both v3 and v4 util files; two `ZodType`s (v3/v4) sharing a name
 - 2026-11-12 release profile tuning (fat LTO, codegen-units=1) measured: -1% index, -6% callers: not worth the build time; `strip` only saves 3 MB; never `panic = "abort"` (PDF reader uses catch_unwind)
+- 2026-11-14 package names come from every package.json (user); the root one is read even when .gitignore matches it (zod force-adds it); targets must be indexable files, .d.ts last; a name two packages share is dropped
+- 2026-11-14 TS overloads: the annotated implementation's return type wins (user); else signatures must agree, or none
+- 2026-11-14 TS: a type returned by a function is first the one declared in that function's file (`members_up(.., home)`); same-named types elsewhere are rivals
+- 2026-11-14 Rust: inherent method hides a trait-impl method of the same impl target (same file) at the same or later receiver step, only for a known receiver type (never `x.f()`: may be `Pin<&mut T>`)
+- 2026-11-14 TS: `import { z } from "pkg"` is `Module("pkg::z")` only as a plain receiver; not a namespace -> read as `x.f()`
 
 ## Gotchas
 - `cargo install` without `--locked` ignores Cargo.lock (pulled tree-sitter 0.27.2): use `just install`. `codegraph stats` (and MCP `stats`) warns when SCIP data is missing or stale
@@ -119,4 +121,6 @@ New decisions go here, one dated line each; older ones are in `docs/HISTORY.md` 
   - untested: `benchmark` with Graphify installed, `benchmark --json`, multi-level Louvain with weighted edges
   - `benchmark` explain answers read the saved index, which can be older than the cold build it times
   - tokio communities are lumpy (biggest 179 files, name-match noise like `new_v4`): Phase 5 fixes the cause; Graphify's oversized-community split was skipped
-
+- The `ignore` walker honours .gitignore even for git-tracked files (zod ignores `**/package.json` but tracks the root one)
+- `just scip` fails with "no usable index" after a VERSION bump: run `codegraph index` first
+- A test helper `call()` in scope.rs names the callee `f`: set `callee` explicitly for name-based rules
