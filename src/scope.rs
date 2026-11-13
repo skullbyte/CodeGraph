@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::lang::Lang;
 use crate::model::{Call, FileEntry, Form, Hop, Index, Kind, Resolution, Ret, Symbol};
 use crate::query;
+use crate::tspath::{TsPaths, is_ts};
 use crate::usepath::{UsePaths, plain_type};
 
 /// A project definition: file, 1-based line (as SCIP names it) and the type or trait it is in.
@@ -41,6 +42,8 @@ pub struct Resolver {
     by_name: HashMap<String, Vec<Def>>,
     /// Rust `use` paths and re-exports.
     paths: UsePaths,
+    /// TypeScript/JavaScript imports and re-exports.
+    ts: TsPaths,
     /// Names of traits (any language): their default methods are what extension traits add.
     traits: HashSet<String>,
     /// Names declared as a type alias somewhere: an alias hides what its target type implements.
@@ -49,6 +52,8 @@ pub struct Resolver {
     nominal: HashSet<String>,
     /// Type name -> the types it extends or implements (every declaration of that name).
     bases: HashMap<String, Vec<String>>,
+    /// Type name -> files that declare a type (class, interface, ...) of that name.
+    type_files: HashMap<String, Vec<String>>,
 }
 
 /// The class a call returns, and the files of the functions that return it.
@@ -107,8 +112,15 @@ impl Resolver {
         let mut aliased = HashSet::new();
         let mut nominal = HashSet::new();
         let mut bases: HashMap<String, Vec<String>> = HashMap::new();
+        let mut type_files: HashMap<String, Vec<String>> = HashMap::new();
         for file in index.files.values() {
             for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
+                if s.kind.is_type() {
+                    type_files
+                        .entry(s.name.clone())
+                        .or_default()
+                        .push(file.path.clone());
+                }
                 if !s.bases.is_empty() {
                     let known = bases.entry(s.name.clone()).or_default();
                     known.extend(s.bases.iter().filter(|b| **b != s.name).cloned());
@@ -136,25 +148,35 @@ impl Resolver {
             imports: imports.into_iter().collect(),
             by_name,
             paths: UsePaths::new(index),
+            ts: TsPaths::new(index),
             traits,
             aliased,
             nominal,
             bases,
+            type_files,
         }
     }
 
     /// Indexes into `defs` that are members of `ty`; when it has none, of its nearest bases that
     /// have some (all bases of one level together; cycles and deep trees end).
-    fn members_up(&self, defs: &[Def], ty: &str) -> Vec<usize> {
+    /// A type declared in one of the `home` files is that one: members of a same-named type
+    /// elsewhere (zod's v3 `ZodString` next to v4's) are left out. Known gap: an interface merged
+    /// from another file (`declare module` augmentation) loses its members there too; the call
+    /// then falls back to the wider set, never to a wrong one.
+    fn members_up(&self, defs: &[Def], ty: &str, home: &[String]) -> Vec<usize> {
+        let at_home = |t: &str| {
+            self.type_files
+                .get(t)
+                .is_some_and(|files| files.iter().any(|f| home.contains(f)))
+        };
         let mut seen: HashSet<&str> = HashSet::from([ty]);
         let mut level = vec![ty];
         for _ in 0..MAX_BASES {
             let found: Vec<usize> = (0..defs.len())
                 .filter(|&i| {
-                    defs[i]
-                        .container
-                        .as_deref()
-                        .is_some_and(|c| level.contains(&c))
+                    defs[i].container.as_deref().is_some_and(|c| {
+                        level.contains(&c) && (home.contains(&defs[i].path) || !at_home(c))
+                    })
                 })
                 .collect();
             if !found.is_empty() {
@@ -190,14 +212,14 @@ impl Resolver {
                 self.members_typed(defs, &ty)
             }
             Form::Type(ty) => {
-                let up = self.members_up(defs, plain_type(ty));
+                let up = self.members_up(defs, plain_type(ty), &[]);
                 self.resolve_form(from, &hop.callee, &hop.form, owner, defs, depth + 1)
                     .into_iter()
                     .filter(|i| up.contains(i))
                     .collect()
             }
             // The wider fallback of `resolve_form` may not decide a type: keep real matches only.
-            Form::SelfRef => owner.map_or_else(Vec::new, |o| self.members_up(defs, o)),
+            Form::SelfRef => owner.map_or_else(Vec::new, |o| self.members_up(defs, o, &[])),
             Form::Bare | Form::Module(_) => self
                 .resolve_form(from, &hop.callee, &hop.form, owner, defs, depth + 1)
                 .into_iter()
@@ -229,7 +251,11 @@ impl Resolver {
     /// vs `oneshot::Sender`): a member goes only when it is a rival from the point of view of every
     /// file that returns the class. Never empties the set.
     fn members_typed(&self, defs: &[Def], typed: &Typed) -> Vec<usize> {
-        let members = self.members_up(defs, &typed.ty);
+        // TS has no `use` paths to tell same-named types apart: the type a function returns is
+        // first the one written in the function's own file.
+        let ts = typed.froms.iter().all(|f| is_ts(f));
+        let home = if ts { typed.froms.as_slice() } else { &[] };
+        let members = self.members_up(defs, &typed.ty, home);
         let rivals: Vec<(Vec<String>, Vec<String>)> = typed
             .froms
             .iter()
@@ -251,7 +277,18 @@ impl Resolver {
                 })
             })
             .collect();
-        if kept.is_empty() { members } else { kept }
+        let kept = if kept.is_empty() { members } else { kept };
+        if ts {
+            let beside: Vec<usize> = kept
+                .iter()
+                .copied()
+                .filter(|&i| typed.froms.contains(&defs[i].path))
+                .collect();
+            if !beside.is_empty() {
+                return beside;
+            }
+        }
+        kept
     }
 
     /// Indexes into `defs` that a call made in file `from` can reach: the best tier that has any
@@ -306,7 +343,7 @@ impl Resolver {
         depth: usize,
     ) -> Vec<usize> {
         let all = || (0..defs.len()).collect::<Vec<_>>();
-        let of_type = |t: &str| self.members_up(defs, t);
+        let of_type = |t: &str| self.members_up(defs, t, &[]);
         let narrowed = |set: Vec<usize>| if set.is_empty() { all() } else { set };
         match form {
             Form::Returned(hop) => match self.hop_type(from, hop, owner, depth) {
@@ -358,7 +395,9 @@ impl Resolver {
                     return all();
                 }
                 let files = match form {
+                    Form::Module(m) if is_ts(from) => self.ts.module(from, m, name),
                     Form::Module(m) => self.paths.module(from, m, name),
+                    _ if is_ts(from) => self.ts.bare(from, name),
                     _ => self.paths.bare(from, name),
                 };
                 let used: Vec<usize> = set
@@ -1211,6 +1250,99 @@ mod tests {
         // SCIP names something we do not list: the form decides.
         assert_eq!(r.candidates("src/a.rs", &c, Some(&at(9)), &defs), vec![0]);
         assert_eq!(r.candidates("src/a.rs", &c, None, &defs), vec![0]);
+    }
+
+    /// A TypeScript file as the extractor sees it.
+    fn ts_entry(path: &str, src: &str) -> FileEntry {
+        let facts = crate::lang::extract(crate::lang::Lang::TypeScript, src).unwrap();
+        FileEntry {
+            path: path.into(),
+            symbols: facts.symbols,
+            uses: facts.uses,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_ts_chain_prefers_the_members_written_beside_the_returning_function() {
+        // Two `ZodType`s (v3, v4); `number()` returns the v4 one, defined in its own file.
+        let r = Resolver::new(&index(vec![
+            ts_entry(
+                "app.ts",
+                "import * as z from './v4/schemas';\nz.number().safeParse();\n",
+            ),
+            ts_entry(
+                "v3/types.ts",
+                "export class ZodType {\n  safeParse() {}\n}\n",
+            ),
+            ts_entry(
+                "v4/schemas.ts",
+                "export interface ZodType {\n  safeParse(): void;\n}\n\
+                 export interface ZodNumber extends ZodType {}\n\
+                 export function number(): ZodNumber { return null!; }\n",
+            ),
+        ]));
+        let d = vec![
+            in_type("v3/types.ts", 2, "ZodType"),
+            in_type("v4/schemas.ts", 2, "ZodType"),
+        ];
+        let c = Call {
+            callee: "safeParse".into(),
+            ..chained(Form::Returned(hop(
+                "number",
+                Form::Module("schemas".into()),
+                false,
+            )))
+        };
+        assert_eq!(r.resolve("app.ts", &c, &d), vec![1]);
+    }
+
+    #[test]
+    fn a_same_named_type_elsewhere_does_not_hide_an_inherited_member() {
+        // v3's `ZodString` declares `min` itself; v4's inherits it from `_ZodString`.
+        let r = Resolver::new(&index(vec![
+            ts_entry(
+                "app.ts",
+                "import * as z from './v4/schemas';\nz.string().min();\n",
+            ),
+            ts_entry("v3/types.ts", "export class ZodString {\n  min() {}\n}\n"),
+            ts_entry(
+                "v4/schemas.ts",
+                "export interface _ZodString {\n  min(): this;\n}\n\
+                 export interface ZodString extends _ZodString {}\n\
+                 export function string(): ZodString { return null!; }\n",
+            ),
+        ]));
+        let d = vec![
+            in_type("v3/types.ts", 2, "ZodString"),
+            in_type("v4/schemas.ts", 2, "_ZodString"),
+        ];
+        let c = Call {
+            callee: "min".into(),
+            ..chained(Form::Returned(hop(
+                "string",
+                Form::Module("schemas".into()),
+                false,
+            )))
+        };
+        assert_eq!(r.resolve("app.ts", &c, &d), vec![1]);
+    }
+
+    #[test]
+    fn a_ts_module_call_follows_re_exports_to_one_definition() {
+        let entry = ts_entry;
+        let r = Resolver::new(&index(vec![
+            entry("app.ts", "import * as z from './v4';\nz.string();\n"),
+            entry("v4/index.ts", "export * from './classic/schemas';\n"),
+            entry("v4/classic/schemas.ts", "export function string() {}\n"),
+            entry("v4/mini/schemas.ts", "export function string() {}\n"),
+        ]));
+        let d = defs(&[("v4/classic/schemas.ts", 1), ("v4/mini/schemas.ts", 1)]);
+        let c = Call {
+            callee: "string".into(),
+            ..call(Form::Module("v4".into()), None)
+        };
+        assert_eq!(r.resolve("app.ts", &c, &d), vec![0]);
     }
 
     #[test]

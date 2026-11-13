@@ -947,3 +947,29 @@ fn cutting_text_never_splits_a_character_and_an_empty_list_says_none() {
     );
     assert!(nobody.lines_in(Mode::Brief, |_| Vec::new()).is_empty());
 }
+
+#[test]
+fn a_package_alias_to_a_file_matches_only_that_exact_name() {
+    let mut index = index_of(&[
+        (
+            "app.ts",
+            "import a from 'zod/v4';\nimport b from 'zod/v4-mini';\nimport c from 'zod/v4/x';\n",
+        ),
+        ("src/v4/index.ts", "export const a = 1;\n"),
+        ("src/v4/x.ts", "export const c = 1;\n"),
+    ]);
+    index.aliases = BTreeMap::from([
+        ("zod/".to_string(), "src/".to_string()),
+        ("zod/v4".to_string(), "src/v4/index.ts".to_string()),
+    ]);
+    let got: Vec<_> = ["zod/v4", "zod/v4-mini", "zod/v4/x"]
+        .iter()
+        .map(|imp| resolve_import(&index.files, &index.aliases, "app.ts", imp))
+        .collect();
+    let some = |p: &str| Some(p.to_string());
+    // `zod/v4/x` is under the folder alias `zod/`, not inside the file `zod/v4` names.
+    assert_eq!(
+        got,
+        vec![some("src/v4/index.ts"), None, some("src/v4/x.ts")]
+    );
+}

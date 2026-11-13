@@ -25,6 +25,13 @@ pub fn list_docs(root: &Path) -> Result<Vec<String>> {
     })
 }
 
+/// Every `package.json` under `root` (node_modules and build folders skipped), same rules.
+pub fn list_manifests(root: &Path) -> Result<Vec<String>> {
+    walk(root, |rel| {
+        rel == "package.json" || rel.ends_with("/package.json")
+    })
+}
+
 fn walk(root: &Path, wanted: impl Fn(&str) -> bool) -> Result<Vec<String>> {
     let walker = WalkBuilder::new(root)
         .require_git(false)

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 use super::{Facts, caller_name, field_text, line_of, signature, text};
-use crate::model::{Call, Form, Hop, Kind, Ret, Symbol};
+use crate::model::{Call, Form, Hop, Kind, Ret, Symbol, Use};
 
 pub fn extract(root: Node, src: &str) -> Facts {
     let mut facts = Facts::default();
@@ -176,7 +176,7 @@ fn collect_specifiers(named: Node, src: &str, stem: &str, names: &mut HashMap<St
 
 /// `./price` -> `price`, `../core/index.js` -> `core`, `zod/v3` -> `v3`, `@scope/pkg` -> `pkg`:
 /// the last name of the path that is not `index`.
-fn module_stem(specifier: &str) -> Option<String> {
+pub(crate) fn module_stem(specifier: &str) -> Option<String> {
     let path = specifier.trim_matches(['\'', '"', '`']);
     let mut parts = path.rsplit('/');
     let file = parts.next()?;
@@ -311,16 +311,22 @@ fn add_item(
             returns: returns_of(node, src, container),
             bases: bases_of(node, src),
         });
-    } else if matches!(node.kind(), "function_signature" | "method_signature") {
-        // Overloads that return different classes: which one a call gets is unknown.
+    } else {
+        // Overloads that return different classes: which one a call gets is unknown, unless the
+        // implementation names its type (TypeScript makes it fit every overload; user, 2026-11-14).
         let returns = returns_of(node, src, container);
+        let signature = matches!(node.kind(), "function_signature" | "method_signature");
         let group = facts
             .symbols
             .iter_mut()
             .rev()
             .find(|s| s.name == name && s.container.as_deref() == container);
-        if let Some(first) = group.filter(|f| f.returns != returns) {
-            first.returns = None;
+        if let Some(first) = group {
+            if !signature && returns.is_some() {
+                first.returns = returns;
+            } else if signature && first.returns != returns {
+                first.returns = None;
+            }
         }
     }
     Some(sig)
@@ -391,6 +397,73 @@ fn add_import(node: Node, src: &str, facts: &mut Facts) {
     let path = path.trim_matches(['\'', '"', '`']);
     if !path.is_empty() {
         facts.imports.push(path.to_string());
+        uses_of(node, path, src, &mut facts.uses);
+    }
+}
+
+/// What an import or a re-export brings in, as `uses`: alias -> `spec` for a whole module
+/// (`* as z`, `export *` under the alias `*`), `spec::name` for one name (`{ a as b }`, a default
+/// import is `spec::default`). Exports are `public`: other files reach the names through them.
+/// Named re-exports follow Graphify's `re_exports` (`extract.py` `_import_js`, MIT, safishamsi/graphify).
+fn uses_of(stmt: Node, spec: &str, src: &str, out: &mut Vec<Use>) {
+    let public = stmt.kind() == "export_statement";
+    let mut push = |alias: &str, path: String| {
+        out.push(Use {
+            alias: alias.trim_matches(['\'', '"']).to_string(),
+            path,
+            public,
+            local: false,
+        });
+    };
+    let item = |name: &str| format!("{spec}::{}", name.trim_matches(['\'', '"']));
+    let mut whole = public; // `export * from` has no clause
+    let mut cursor = stmt.walk();
+    for child in stmt.named_children(&mut cursor) {
+        let mut inner = child.walk();
+        let parts: Vec<Node> = child.named_children(&mut inner).collect();
+        match child.kind() {
+            "import_clause" => {
+                for part in parts {
+                    match part.kind() {
+                        "identifier" => push(text(part, src), item("default")),
+                        "namespace_import" => {
+                            if let Some(id) = part.named_child(0) {
+                                push(text(id, src), spec.to_string());
+                            }
+                        }
+                        "named_imports" => {
+                            let mut c = part.walk();
+                            for one in part.named_children(&mut c) {
+                                if let Some(name) = field_text(one, "name", src) {
+                                    let alias = field_text(one, "alias", src).unwrap_or(name);
+                                    push(alias, item(name));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "export_clause" => {
+                whole = false;
+                for one in parts {
+                    if let Some(name) = field_text(one, "name", src) {
+                        let alias = field_text(one, "alias", src).unwrap_or(name);
+                        push(alias, item(name));
+                    }
+                }
+            }
+            "namespace_export" => {
+                whole = false;
+                if let Some(id) = parts.first() {
+                    push(text(*id, src), spec.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if whole {
+        push("*", spec.to_string());
     }
 }
 
@@ -980,6 +1053,38 @@ function local() { show(1); }
     }
 
     #[test]
+    fn imports_and_re_exports_are_kept_as_uses() {
+        let src = "import * as z from 'zod/v4';
+import d, { a, b as c } from './x.js';
+import type { T } from './t';
+export * from './schemas.js';
+export * as core from '../core/index.js';
+export { e, f as g } from './y';
+export { local };
+";
+        let facts = extract_file(Lang::TypeScript, src).unwrap();
+        let got: Vec<_> = facts
+            .uses
+            .iter()
+            .map(|u| (u.alias.as_str(), u.path.as_str(), u.public))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("z", "zod/v4", false),
+                ("d", "./x.js::default", false),
+                ("a", "./x.js::a", false),
+                ("c", "./x.js::b", false),
+                ("T", "./t::T", false),
+                ("*", "./schemas.js", true),
+                ("core", "../core/index.js", true),
+                ("e", "./y::e", true),
+                ("g", "./y::f", true),
+            ]
+        );
+    }
+
+    #[test]
     fn classes_and_interfaces_keep_what_they_extend_and_implement() {
         let src = "class B extends ns.A<T> implements I, J<K> {}
 interface X extends Y, ns.Z<T> {}
@@ -1051,6 +1156,9 @@ export function over(a: any) {}
 export function same(a: string): One;
 export function same(a: number): One;
 export function same(a: any): One { return a; }
+export function pick(a: string): One;
+export function pick(a: number): Two;
+export function pick(a: any): One { return a; }
 export const mk = (): Thing => new Thing();
 ";
         let facts = extract_file(Lang::TypeScript, src).unwrap();
@@ -1077,6 +1185,7 @@ export const mk = (): Thing => new Thing();
                 ("make", Some(("Builder", false))),
                 ("over", None),
                 ("same", Some(("One", false))),
+                ("pick", Some(("One", false))),
                 ("mk", Some(("Thing", false))),
             ]
         );

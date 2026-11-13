@@ -14,7 +14,11 @@ pub type Snapshot = BTreeMap<String, (SystemTime, u64)>;
 
 pub fn snapshot(root: &Path) -> Result<Snapshot> {
     let mut snap = Snapshot::new();
-    for rel in walk::list_files(root)? {
+    // package.json files aren't indexed either, but they name the packages (see `import_aliases`).
+    for rel in walk::list_files(root)?
+        .into_iter()
+        .chain(walk::list_manifests(root)?)
+    {
         // A file can vanish between listing and stat; it simply shows up as removed next time.
         let Ok(meta) = fs::metadata(root.join(&rel)) else {
             continue;
@@ -23,11 +27,14 @@ pub fn snapshot(root: &Path) -> Result<Snapshot> {
             snap.insert(rel, (modified, meta.len()));
         }
     }
-    // tsconfig.json isn't indexed, but its alias table is, so changes to it must be noticed too.
-    if let Ok(meta) = fs::metadata(root.join("tsconfig.json"))
-        && let Ok(modified) = meta.modified()
-    {
-        snap.insert("tsconfig.json".to_string(), (modified, meta.len()));
+    // tsconfig.json isn't indexed, but its alias table is, so changes to it must be noticed too;
+    // so must the root package.json, read even when .gitignore matches it.
+    for config in ["tsconfig.json", "package.json"] {
+        if let Ok(meta) = fs::metadata(root.join(config))
+            && let Ok(modified) = meta.modified()
+        {
+            snap.insert(config.to_string(), (modified, meta.len()));
+        }
     }
     Ok(snap)
 }
@@ -81,5 +88,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
         assert!(snapshot(dir.path()).unwrap().contains_key("tsconfig.json"));
+    }
+
+    #[test]
+    fn snapshot_includes_every_package_json_so_package_names_are_refreshed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("pkg")).unwrap();
+        fs::write(dir.path().join("pkg/package.json"), "{}").unwrap();
+        assert!(
+            snapshot(dir.path())
+                .unwrap()
+                .contains_key("pkg/package.json")
+        );
     }
 }

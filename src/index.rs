@@ -198,9 +198,136 @@ pub fn lock(root: &Path) -> Result<fs::File> {
 
 /// All import aliases of a project: tsconfig's (TypeScript) and composer's (PHP).
 pub fn import_aliases(root: &Path) -> BTreeMap<String, String> {
-    let mut aliases = tsconfig_aliases(root);
+    let mut aliases = package_aliases(root);
+    aliases.extend(tsconfig_aliases(root));
     aliases.extend(composer_aliases(root));
     aliases
+}
+
+/// Package names from every package.json in the project, so `import * as z from "zod/v4"` reaches
+/// the package's own source: `"zod/v4"` -> the file its `exports` entry names (an alias to a
+/// file matches only that exact name), `"zod/v4/locales/"` -> the folder of a `./v4/locales/*`
+/// entry. A name two packages share is left out. Ours: Graphify does not resolve package names.
+fn package_aliases(root: &Path) -> BTreeMap<String, String> {
+    let mut by_name: BTreeMap<String, Vec<(String, serde_json::Value)>> = BTreeMap::new();
+    let mut manifests = walk::list_manifests(root).unwrap_or_default();
+    // The project's own package.json counts even when .gitignore matches it (zod force-adds its
+    // root one past `**/package.json`, which is meant for generated copies).
+    if !manifests.iter().any(|m| m == "package.json") && root.join("package.json").is_file() {
+        manifests.push("package.json".to_string());
+    }
+    for rel in manifests {
+        let Ok(raw) = fs::read_to_string(root.join(&rel)) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(name) = json["name"].as_str().filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        let folder = rel.strip_suffix("package.json").unwrap_or("").to_string();
+        by_name
+            .entry(name.to_string())
+            .or_default()
+            .push((folder, json));
+    }
+    let mut aliases = BTreeMap::new();
+    for (name, packages) in &by_name {
+        if let [(folder, json)] = packages.as_slice() {
+            aliases.extend(package_entries(root, name, folder, json));
+        }
+    }
+    aliases
+}
+
+/// The aliases one package gives: its `exports` entries, or else `source`/`module`/`main`/`types`.
+fn package_entries(
+    root: &Path,
+    name: &str,
+    folder: &str,
+    json: &serde_json::Value,
+) -> Vec<(String, String)> {
+    let exports = &json["exports"];
+    let subpaths = exports
+        .as_object()
+        .filter(|map| map.keys().any(|k| k.starts_with('.')));
+    let Some(map) = subpaths else {
+        // One entry for the package itself: `"exports": "./x.js"` or conditions, or the old fields.
+        let fields = ["source", "module", "main", "types"].map(|f| &json[f]);
+        let targets = if exports.is_null() {
+            fields.iter().flat_map(|f| targets_of(f)).collect()
+        } else {
+            targets_of(exports)
+        };
+        return source_file(root, folder, &targets)
+            .map(|file| (name.to_string(), file))
+            .into_iter()
+            .collect();
+    };
+    let mut out = Vec::new();
+    for (key, target) in map {
+        let Some(sub) = key.strip_prefix('.') else {
+            continue;
+        };
+        let spec = format!("{name}{sub}");
+        let targets = targets_of(target);
+        let entry = match spec.strip_suffix('*') {
+            Some(prefix) => targets.iter().find_map(|t| {
+                let dir = query::normalize(&format!("{folder}{}", t.strip_suffix('*')?));
+                root.join(&dir).is_dir().then(|| {
+                    (
+                        prefix.to_string(),
+                        format!("{}/", dir.trim_end_matches('/')),
+                    )
+                })
+            }),
+            None => source_file(root, folder, &targets).map(|file| (spec, file)),
+        };
+        out.extend(entry);
+    }
+    out
+}
+
+/// Every path an `exports` value names: a string, an array of them, or conditions (any keys).
+fn targets_of(value: &serde_json::Value) -> Vec<&str> {
+    match value {
+        serde_json::Value::String(s) => vec![s.as_str()],
+        serde_json::Value::Array(list) => list.iter().flat_map(targets_of).collect(),
+        serde_json::Value::Object(map) => map.values().flat_map(targets_of).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The first target that is an indexed code file, declaration files (`.d.ts`) last; a build
+/// output (`dist/x.js`, never indexed) is looked for as source (`src/x.ts`).
+fn source_file(root: &Path, folder: &str, targets: &[&str]) -> Option<String> {
+    let is_code = |p: &str| {
+        Lang::from_path(p).is_some_and(|l| l != Lang::Markdown)
+            && walk::is_indexable(root, p)
+            && root.join(p).is_file()
+    };
+    let declaration = |t: &&str| [".d.ts", ".d.cts", ".d.mts"].iter().any(|e| t.ends_with(e));
+    let mut targets = targets.to_vec();
+    targets.sort_by_key(|t| declaration(t));
+    targets.iter().find_map(|t| {
+        let own = query::normalize(&format!("{folder}{t}"));
+        if is_code(&own) {
+            return Some(own);
+        }
+        let inner = query::normalize(t);
+        let (top, rest) = inner.split_once('/')?;
+        if !["dist", "build", "lib", "out"].contains(&top) {
+            return None;
+        }
+        let stem = [".d.ts", ".d.cts", ".d.mts", ".js", ".mjs", ".cjs"]
+            .iter()
+            .find_map(|ext| rest.strip_suffix(ext))?;
+        [".ts", ".tsx"]
+            .iter()
+            .map(|ext| query::normalize(&format!("{folder}src/{stem}{ext}")))
+            .find(|p| is_code(p))
+    })
 }
 
 /// PSR-4 namespace roots from composer.json (`autoload` and `autoload-dev`): `"App\\": "src/"`
@@ -478,6 +605,89 @@ mod tests {
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn a_built_or_declaration_target_loses_to_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // After a build, dist/ exists but is never indexed.
+        write(
+            root,
+            "a/package.json",
+            r#"{"name": "a", "main": "dist/index.js"}"#,
+        );
+        write(root, "a/dist/index.js", "exports.x = 1;\n");
+        write(root, "a/src/index.ts", "export {};\n");
+        // `types` sorts before `x-source`; the declaration file is not the code.
+        let b = r#"{"name": "b", "exports": {".": {"types": "./index.d.ts", "x-source": "./src/b.ts"}}}"#;
+        write(root, "b/package.json", b);
+        write(root, "b/index.d.ts", "export {};\n");
+        write(root, "b/src/b.ts", "export {};\n");
+        let got = package_aliases(root);
+        assert_eq!(got.get("a").map(String::as_str), Some("a/src/index.ts"));
+        assert_eq!(got.get("b").map(String::as_str), Some("b/src/b.ts"));
+    }
+
+    #[test]
+    fn the_root_package_json_counts_even_when_gitignore_matches_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, ".gitignore", "**/package.json\n");
+        write(
+            root,
+            "package.json",
+            r#"{"name": "zod", "exports": "./src/index.ts"}"#,
+        );
+        write(root, "src/index.ts", "export {};\n");
+        let got = package_aliases(root);
+        assert_eq!(got.get("zod").map(String::as_str), Some("src/index.ts"));
+    }
+
+    #[test]
+    fn package_names_map_to_the_source_files_their_exports_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let zod = r#"{"name": "zod", "exports": {
+            ".": {"@zod/source": "./src/index.ts", "import": "./index.js"},
+            "./v4": {"types": "./v4/index.d.cts", "@zod/source": "./src/v4/index.ts"},
+            "./v4/locales/*": {"@zod/source": "./src/v4/locales/*"},
+            "./v4-mini": ["./dist/v4/mini/index.js"],
+            "./package.json": "./package.json"
+        }}"#;
+        write(root, "packages/zod/package.json", zod);
+        for f in [
+            "src/index.ts",
+            "src/v4/index.ts",
+            "src/v4/locales/en.ts",
+            "src/v4/mini/index.ts",
+        ] {
+            write(root, &format!("packages/zod/{f}"), "export {};\n");
+        }
+        // No exports: `main` names the build, the source sits under src/.
+        write(
+            root,
+            "packages/other/package.json",
+            r#"{"name": "@s/other", "main": "dist/index.js"}"#,
+        );
+        write(root, "packages/other/src/index.ts", "export {};\n");
+        // Two packages of one name: neither is trusted.
+        write(root, "a/package.json", r#"{"name": "dup", "main": "x.ts"}"#);
+        write(root, "a/x.ts", "export {};\n");
+        write(root, "b/package.json", r#"{"name": "dup", "main": "x.ts"}"#);
+        write(root, "b/x.ts", "export {};\n");
+        let got = package_aliases(root);
+        let want: BTreeMap<String, String> = [
+            ("@s/other", "packages/other/src/index.ts"),
+            ("zod", "packages/zod/src/index.ts"),
+            ("zod/v4", "packages/zod/src/v4/index.ts"),
+            ("zod/v4-mini", "packages/zod/src/v4/mini/index.ts"),
+            ("zod/v4/locales/", "packages/zod/src/v4/locales/"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(got, want);
     }
 
     #[test]

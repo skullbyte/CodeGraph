@@ -3,10 +3,11 @@
 ## Now
 Task: E1, plan `~/.claude/plans/refactored-cooking-umbrella.md` (approved 2026-11-12, 4 steps). Steps 1+2 committed in bd020c2 (not pushed): TS `returns_of` + `hop_of`/`Form::Returned` in `call_form`; `just check` green (495 lib + 44 cli).
 zod after 1+2: form still 8% right / 8% wrong; new "chain" row 3866 calls: 6% right, 0% wrong, 94% narrowed (needs step 4, inheritance).
-E1 steps 3+4 done 2026-11-13, uncommitted (with TODO 00): call-made `const` locals (`Known::{Class, Value(Node)}`, top level too) and inheritance (`Symbol.bases` from TS extends/implements, `Resolver::members_up`, VERSION 10); `just check` green (500 lib + 44 cli), binary installed.
-zod: form right 9% / wrong 8% (was 8/8); type 88% right (was 4%); chain 7737 calls 5% right / 0% wrong: blocked by package self-imports (TODO E1b). tokio 64/0 and this repo 97/0 unchanged.
-code-reviewer: 3 rounds, ends "no remaining issues" (fixed: shadowed names in a stored value, overloads with different returns, `require` locals); `just check` 502 lib + 44 cli.
-Next step: commit (ask the user: TODO 00 rules split, then E1 steps 3+4), then E1b or E2.
+Task: E1b (plan `~/.claude/plans/graceful-jingling-sifakis.md`, approved 2026-11-14): TS package names + re-export following. E1 committed (17e58c6, rules split 26e9973), not pushed.
+E1b state 2026-11-14, uncommitted: steps 1-4 done (package.json aliases incl. root one past .gitignore, exact file aliases, TS `uses`, new `src/tspath.rs`, resolver uses it for TS Module/Bare, `type_files` + `members_up(.., home)`, overload group takes the annotated implementation's return type (user)). `just check` 513 lib + 44 cli; binary installed.
+zod: form right 60% / wrong 6% (E1 start 8/8); chain 50/0, module 83/2, bare 70/0, type 88/3. tokio 64/0, this repo 96/0 (new test call sites), index tokio cached 33 ms, update 7.1 ms (+1.3 ms: package.json walk), zod index 19 ms.
+code-reviewer: 2 rounds, "no remaining issues" (fixed: package targets must be indexable files, .d.ts last). Committed with this note.
+Next step: pick the next precision item (see TODO E: TS method calls on untyped values are zod's biggest wrong bucket; then E2 Rust type identity).
 Scores (tokio form): right 64% / wrong 0% / narrowed 22% / lost 0%; this repo 97% right; zod 8%. SCIP on this repo: 14454 of 14973 calls resolved (2026-11-12).
 `origin` = github.com/skullbyte/CodeGraph; `main` tracks `origin/main`, pushed up to 98b3143, bd020c2 local only (user pushes with `! git push`).
 Rules: tests first, model `opusplan` (opus only for hard tasks, chosen before the first message), `code-reviewer` (sonnet, diff only, max 3 rounds) until "no remaining issues", commit by file name, no AI attribution, never push unless asked, `cargo add` only by the user with `!`.
@@ -19,7 +20,7 @@ Rules: tests first, model `opusplan` (opus only for hard tasks, chosen before th
 - [~] Part B: full Graphify parity
   - [x] round 1: `query` (5f76a49), `tour` (62d7c39), `--teach` (24f6bf2 + 0e68c28)
   - [ ] round 2, in the user's order: [ ] more languages: [x] Kotlin, [x] PHP, [x] Ruby, [x] Swift (one commit each, plan ~/.claude/plans/swirling-cooking-robin.md); [ ] big-graph html view (aggregated above 5000 nodes, --node-limit, --no-viz); [ ] Obsidian `canvas` export; [ ] `label` (LLM-named communities) + `save-result`/`reflect`
-  - [~] precision plan 2 (~/.claude/plans/synthetic-foraging-milner.md): [x] TS steps 1-4 (d851158, 4c0f85d, 8a759ec); [x] generic walker container/owner/form + Python (131a8c3); [x] `explain` modes (ad42b5f); [x] Rust receiver types (2d9efdb); [x] call chains via return types; [x] `--def` filter (wired into callers/explain); [ ] file explain; [x] E1 TS return types for chains: [x] 1 return types, [x] 2 chains (bd020c2), [x] 3 call-made locals incl. top level, [x] 4 inheritance (`bases`, `members_up`); [ ] forms for Java/Kotlin/Go/C#/C++/Ruby/PHP/Swift (needs SCIP truth, blocked, see Now); [ ] Dart/Flutter
+  - [~] precision plan 2 (~/.claude/plans/synthetic-foraging-milner.md): [x] TS steps 1-4 (d851158, 4c0f85d, 8a759ec); [x] generic walker container/owner/form + Python (131a8c3); [x] `explain` modes (ad42b5f); [x] Rust receiver types (2d9efdb); [x] call chains via return types; [x] `--def` filter (wired into callers/explain); [ ] file explain; [x] E1 TS return types for chains (17e58c6): [x] 1 return types, [x] 2 chains (bd020c2), [x] 3 call-made locals incl. top level, [x] 4 inheritance (`bases`, `members_up`); [x] E1b package names + re-exports (`src/tspath.rs`); [ ] forms for Java/Kotlin/Go/C#/C++/Ruby/PHP/Swift (needs SCIP truth, blocked, see Now); [ ] Dart/Flutter
   - [x] 2026-11-02: `callers`/`explain` use the resolver + `--def`; `scip --run` + saved-SCIP re-apply in `index`; `update` delta log (7 ms)
 - Open items, in priority order: `docs/TODO.md` (the single list; older duplicate lines are in `docs/HISTORY.md`)
 

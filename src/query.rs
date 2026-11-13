@@ -348,7 +348,7 @@ fn resolve_import<V>(
 }
 
 /// Relative path (`./x`, `../x`) or tsconfig alias (`~/x`); anything else is a package.
-fn resolve_ts_import<V>(
+pub(crate) fn resolve_ts_import<V>(
     files: &BTreeMap<String, V>,
     aliases: &BTreeMap<String, String>,
     from: &str,
@@ -386,10 +386,12 @@ fn import_base(aliases: &BTreeMap<String, String>, dir: &str, imp: &str) -> Opti
     if imp.starts_with('.') {
         return Some(normalize(&format!("{dir}/{imp}")));
     }
-    // The longest matching prefix wins, so `@components/` beats `@/`.
+    // The longest matching prefix wins, so `@components/` beats `@/`; an alias to a file (a
+    // package entry such as `zod/v4`) matches only that exact name.
+    let to_folder = |f: &str| f.is_empty() || f.ends_with('/') || f.contains('|');
     let (prefix, folder) = aliases
         .iter()
-        .filter(|(p, _)| imp.starts_with(p.as_str()))
+        .filter(|(p, f)| imp.starts_with(p.as_str()) && (to_folder(f) || imp == p.as_str()))
         .max_by_key(|(p, _)| p.len())?;
     Some(format!("{folder}{}", &imp[prefix.len()..]))
 }

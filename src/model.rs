@@ -27,6 +27,14 @@ impl Kind {
     pub fn is_code_def(self) -> bool {
         !matches!(self, Kind::Impl | Kind::Heading)
     }
+
+    /// A declaration of a type: what a member's container can name.
+    pub fn is_type(self) -> bool {
+        matches!(
+            self,
+            Kind::Struct | Kind::Enum | Kind::Trait | Kind::Type | Kind::Class | Kind::Interface
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
