@@ -3,8 +3,8 @@
 ## Now
 Task: E1, plan `~/.claude/plans/refactored-cooking-umbrella.md` (approved 2026-11-12, 4 steps). Steps 1+2 committed in bd020c2 (not pushed): TS `returns_of` + `hop_of`/`Form::Returned` in `call_form`; `just check` green (495 lib + 44 cli).
 zod after 1+2: form still 8% right / 8% wrong; new "chain" row 3866 calls: 6% right, 0% wrong, 94% narrowed (needs step 4, inheritance).
-Session 2026-11-14 (autonomous, user asked to continue unsupervised): committed E1b (d6ac29b), bare-index namespace fix (a04b2c9), Rust inherent-before-trait methods (this commit). Not pushed.
-zod: form right 65% / wrong 3% (E1 start 8/8). tokio: 67% / 0% (was 64/0; chains 56 -> 66%). This repo 96/0.
+Session 2026-11-14 (autonomous, user asked to continue unsupervised): committed E1b (d6ac29b), bare-index namespace fix (a04b2c9), Rust inherent-before-trait methods (bf425b9), TS namespaces imported by name (this commit). Not pushed.
+zod: form right 70% / wrong 1% (E1 start 8/8; `import { z } from "zod/v4"` namespaces now followed). tokio: 67% / 0% (was 64/0; chains 56 -> 66%). This repo 96/0.
 Rust rule: `Resolver::inherent_first` + `receivers_of`/`receiver_step` (scope.rs): an inherent method hides a trait-impl method of the same impl target (same file) reached at the same or a later receiver step; only for a known receiver type (Type/SelfRef/typed chain).
 Next step: remaining tokio misses: method row (2323 calls, 7% right: closure params, macro bodies = E3, fields of fields), chain narrowed 22%; zod: v3 renamed local exports (`export { stringType as string }`), generic params with constraints (`T extends z.ZodType`).
 Scores (tokio form): right 64% / wrong 0% / narrowed 22% / lost 0%; this repo 97% right; zod 8%. SCIP on this repo: 14454 of 14973 calls resolved (2026-11-12).

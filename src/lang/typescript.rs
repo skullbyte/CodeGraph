@@ -155,12 +155,29 @@ fn module_names(root: Node, src: &str) -> HashMap<String, String> {
                         }
                     }
                     "named_imports" if relative => collect_specifiers(part, src, &stem, &mut names),
+                    // `import { z } from "zod"`: `z` may be a namespace the package exports.
+                    "named_imports" => collect_namespaces(part, src, spec, &mut names),
                     _ => {}
                 }
             }
         }
     }
     names
+}
+
+/// Names imported from a package, as `spec::name` (`zod/v4::z`): read only as the receiver of
+/// a call (`z.string()`), where `src/tspath.rs` follows them to the namespace they may be.
+fn collect_namespaces(named: Node, src: &str, spec: &str, names: &mut HashMap<String, String>) {
+    let spec = spec.trim_matches(['\'', '"', '`']);
+    let mut cursor = named.walk();
+    for one in named.named_children(&mut cursor) {
+        let Some(name) = field_text(one, "name", src).filter(|_| one.kind() == "import_specifier")
+        else {
+            continue;
+        };
+        let local = field_text(one, "alias", src).unwrap_or(name);
+        names.insert(local.to_string(), format!("{spec}::{name}"));
+    }
 }
 
 fn collect_specifiers(named: Node, src: &str, stem: &str, names: &mut HashMap<String, String>) {
@@ -395,12 +412,46 @@ fn add_variable(node: Node, src: &str, facts: &mut Facts) -> Option<String> {
 /// is decided later, when the graph knows the project's tsconfig aliases.
 fn add_import(node: Node, src: &str, facts: &mut Facts) {
     let Some(path) = field_text(node, "source", src) else {
+        add_local_exports(node, src, facts);
         return;
     };
     let path = path.trim_matches(['\'', '"', '`']);
     if !path.is_empty() {
         facts.imports.push(path.to_string());
         uses_of(node, path, src, &mut facts.uses);
+    }
+}
+
+/// `export { z, z as default }` of names this file imported: other files reach the import
+/// through it (zod: `import * as z from "./external.js"; export { z }`). Only imports written
+/// above the export are seen (a hoisted one below is missed, never misread).
+fn add_local_exports(node: Node, src: &str, facts: &mut Facts) {
+    let mut cursor = node.walk();
+    let clauses: Vec<Node> = node
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "export_clause")
+        .collect();
+    for clause in clauses {
+        let mut c = clause.walk();
+        for one in clause.named_children(&mut c) {
+            let Some(name) = field_text(one, "name", src) else {
+                continue;
+            };
+            let alias = field_text(one, "alias", src).unwrap_or(name);
+            let imported = facts
+                .uses
+                .iter()
+                .find(|u| !u.public && u.alias == name)
+                .map(|u| u.path.clone());
+            if let Some(path) = imported {
+                facts.uses.push(Use {
+                    alias: alias.trim_matches(['\'', '"']).to_string(),
+                    path,
+                    public: true,
+                    local: false,
+                });
+            }
+        }
     }
 }
 
@@ -549,7 +600,7 @@ fn add_class_use(node: Node, class: Node, src: &str, facts: &mut Facts, ctx: Ctx
         match ctx
             .modules
             .get(name)
-            .filter(|_| !ctx.locals.contains_key(name))
+            .filter(|m| !ctx.locals.contains_key(name) && !m.contains("::"))
         {
             Some(stem) if path.len() == 2 => Form::Module(stem.clone()),
             Some(_) => Form::Module(text(path[path.len() - 2], src).to_string()),
@@ -607,8 +658,9 @@ fn call_form(function: Node, src: &str, ctx: Ctx, depth: usize) -> Form {
             return Form::Bare; // a parameter or local, not the import of the same name
         }
         return match modules.get(name) {
-            Some(m) => Form::Module(m.clone()),
-            None => Form::Bare,
+            // `make()` imported by name is the function itself, not a namespace member.
+            Some(m) if !m.contains("::") => Form::Module(m.clone()),
+            _ => Form::Bare,
         };
     }
     let Some(object) = function.child_by_field_name("object").map(skip_non_null) else {
@@ -940,7 +992,10 @@ fn namespace_root<'a>(
     while object.kind() == "member_expression" {
         object = object.child_by_field_name("object")?;
     }
-    (object.kind() == "identifier" && modules.contains_key(text(object, src))).then_some(sub)
+    // A name imported from a package (`spec::name`) may be a plain value: only `z.f()` reads it.
+    let namespace = |m: &String| !m.contains("::");
+    (object.kind() == "identifier" && modules.get(text(object, src)).is_some_and(namespace))
+        .then_some(sub)
 }
 
 /// CommonJS `require('./x')`: only a plain string argument counts.
@@ -1061,6 +1116,64 @@ function local() { show(1); }
         assert_eq!(
             got,
             vec![("string".to_string(), Form::Module("../../index.js".into()))]
+        );
+    }
+
+    #[test]
+    fn a_namespace_imported_by_name_from_a_package_is_a_module_only_as_a_receiver() {
+        let src = "import { z, Foo, make } from 'zod/v4';\nz.string();\nFoo.of();\nmake();\n";
+        assert_eq!(
+            call_forms(src),
+            vec![
+                ("string".to_string(), Form::Module("zod/v4::z".into())),
+                typed("of", "Foo"),
+                ("make".into(), Form::Bare),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_package_name_import_keeps_its_old_form_outside_a_plain_receiver() {
+        let src = "import { config, api, zod as zz } from 'pkg';
+config.db.get();
+new api.Client();
+zz.string();
+function f() {
+  const config = make();
+  config.get();
+}
+";
+        let got: Vec<_> = call_forms(src)
+            .into_iter()
+            .filter(|(c, _)| c != "make")
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                method("get"),
+                ("Client".into(), Form::Bare),
+                ("string".into(), Form::Module("pkg::zod".into())),
+                ("get".into(), hop("make", Form::Bare, false)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_local_export_of_an_import_re_exports_it() {
+        let src = "import * as z from './external.js';\nexport { z, z as default, own };\n";
+        let facts = extract_file(Lang::TypeScript, src).unwrap();
+        let got: Vec<_> = facts
+            .uses
+            .iter()
+            .map(|u| (u.alias.as_str(), u.path.as_str(), u.public))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("z", "./external.js", false),
+                ("z", "./external.js", true),
+                ("default", "./external.js", true),
+            ]
         );
     }
 

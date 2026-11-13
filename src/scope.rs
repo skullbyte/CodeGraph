@@ -522,6 +522,13 @@ impl Resolver {
                     .filter(|&i| defs[i].container.is_some())
                     .collect(),
             ),
+            // `z.f()` with `z` imported by name from a package: a namespace only when the
+            // package exports one under that name; else `z` is a value, read as `x.f()`.
+            Form::Module(m)
+                if is_ts(from) && m.contains("::") && !self.ts.is_namespace(from, m) =>
+            {
+                self.resolve_form(from, name, &Form::Method, owner, defs, depth)
+            }
             Form::Bare | Form::Module(_) => {
                 let mut set: Vec<usize> = (0..defs.len())
                     .filter(|&i| defs[i].container.is_none())
@@ -1577,6 +1584,34 @@ mod tests {
             )))
         };
         assert_eq!(r.resolve("app.ts", &c, &d), vec![1]);
+    }
+
+    #[test]
+    fn a_name_imported_from_a_package_that_is_no_namespace_reads_as_a_method_call() {
+        let r = Resolver::new(&index(vec![ts_entry(
+            "app.ts",
+            "import { cfg } from 'pkg';\ncfg.get();\n",
+        )]));
+        let d = vec![
+            in_type("src/config.ts", 3, "Config"),
+            defs(&[("src/util.ts", 9)]).remove(0),
+        ];
+        let c = Call {
+            callee: "get".into(),
+            ..call(Form::Module("pkg::cfg".into()), None)
+        };
+        assert_eq!(r.resolve("app.ts", &c, &d), vec![0]);
+        // A real namespace without that member is not read as `x.get()`.
+        let r = Resolver::new(&index(vec![
+            ts_entry("app.ts", "import { z } from './lib';\nz.get();\n"),
+            ts_entry("lib.ts", "export * as z from './schemas';\n"),
+            ts_entry("schemas.ts", "export function other() {}\n"),
+        ]));
+        let c = Call {
+            callee: "get".into(),
+            ..call(Form::Module("./lib::z".into()), None)
+        };
+        assert!(!r.resolve("app.ts", &c, &d).contains(&0));
     }
 
     #[test]

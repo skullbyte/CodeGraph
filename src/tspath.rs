@@ -58,7 +58,18 @@ impl TsPaths {
 
     /// Files that define `name` when it is called as `m.name()`, `m` a module imported whole
     /// (`import * as m`) whose file name is `stem` (see `module_stem`).
+    /// A `stem` written `spec::item` is a name imported from a package (`zod/v4::z`): the
+    /// namespace that package exports under that name.
     pub fn module(&self, from: &str, stem: &str, name: &str) -> Vec<String> {
+        if let Some((spec, item)) = stem.rsplit_once("::") {
+            let mut seen = HashSet::new();
+            let modules = self.namespaces(from, spec, item, 0, &mut seen);
+            return union(
+                modules
+                    .iter()
+                    .map(|m| self.lookup(m, name, 0, &mut HashSet::new())),
+            );
+        }
         let whole = self
             .uses_of(from)
             .filter(|u| !u.path.contains("::") && module_stem(&u.path).as_deref() == Some(stem));
@@ -92,6 +103,62 @@ impl TsPaths {
         resolve_ts_import(&self.files, &self.aliases, from, spec)
             .map(|file| self.lookup(&file, name, 0, &mut HashSet::new()))
             .unwrap_or_default()
+    }
+
+    /// Is `stem` (`spec::item`) a namespace the package exports, whatever members it has?
+    pub fn is_namespace(&self, from: &str, stem: &str) -> bool {
+        stem.rsplit_once("::").is_some_and(|(spec, item)| {
+            !self
+                .namespaces(from, spec, item, 0, &mut HashSet::new())
+                .is_empty()
+        })
+    }
+
+    /// Files of the module that `item`, imported from `spec` in `file`, is a namespace of:
+    /// `export * as item from`, `export { item }` of an `import * as item`, through `export *`.
+    fn namespaces(
+        &self,
+        file: &str,
+        spec: &str,
+        item: &str,
+        hops: usize,
+        seen: &mut HashSet<(String, String)>,
+    ) -> Vec<String> {
+        let Some(target) = resolve_ts_import(&self.files, &self.aliases, file, spec) else {
+            return Vec::new();
+        };
+        if hops >= MAX_HOPS || !seen.insert((target.clone(), item.to_string())) {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for u in self
+            .uses
+            .get(&target)
+            .into_iter()
+            .flatten()
+            .filter(|u| u.public)
+        {
+            match u.path.rsplit_once("::") {
+                None if u.alias == item => {
+                    found.extend(resolve_ts_import(
+                        &self.files,
+                        &self.aliases,
+                        &target,
+                        &u.path,
+                    ));
+                }
+                Some((s, orig)) if u.alias == item => {
+                    found.extend(self.namespaces(&target, s, orig, hops + 1, seen));
+                }
+                None if u.alias == "*" => {
+                    found.extend(self.namespaces(&target, &u.path, item, hops + 1, seen));
+                }
+                _ => {}
+            }
+        }
+        found.sort();
+        found.dedup();
+        found
     }
 
     /// The name `name` as seen from `file`: defined there, or re-exported by it
@@ -193,6 +260,50 @@ mod tests {
         // An unknown package or name gives nothing.
         assert!(paths.module("t/a.test.ts", "react", "string").is_empty());
         assert!(paths.module("t/a.test.ts", "v4", "nope").is_empty());
+    }
+
+    #[test]
+    fn a_namespace_imported_by_name_is_followed_through_star_and_local_exports() {
+        let mut index = index_of(&[
+            ("t.ts", "import { z } from 'zod/v4';\nz.string();\n"),
+            ("src/v4/index.ts", "export * from './classic/index.js';\n"),
+            (
+                "src/v4/classic/index.ts",
+                "import * as z from './external.js';\nexport { z };\n",
+            ),
+            (
+                "src/v4/classic/external.ts",
+                "export * from './schemas.js';\n",
+            ),
+            ("src/v4/classic/schemas.ts", "export function string() {}\n"),
+        ]);
+        index.aliases = BTreeMap::from([("zod/v4".into(), "src/v4/index.ts".into())]);
+        let paths = TsPaths::new(&index);
+        assert_eq!(
+            paths.module("t.ts", "zod/v4::z", "string"),
+            vec!["src/v4/classic/schemas.ts".to_string()]
+        );
+        // A name that is not a namespace there gives nothing.
+        assert!(paths.module("t.ts", "zod/v4::nope", "string").is_empty());
+    }
+
+    #[test]
+    fn a_namespace_can_be_exported_as_a_star_alias_or_renamed() {
+        let index = index_of(&[
+            ("t.ts", "import { z, y } from './lib';\n"),
+            (
+                "lib.ts",
+                "export * as z from './schemas';\nexport { z as y } from './lib2';\n",
+            ),
+            ("lib2.ts", "export * as z from './schemas';\n"),
+            ("schemas.ts", "export function string() {}\n"),
+        ]);
+        let paths = TsPaths::new(&index);
+        let want = vec!["schemas.ts".to_string()];
+        assert_eq!(paths.module("t.ts", "./lib::z", "string"), want);
+        assert_eq!(paths.module("t.ts", "./lib::y", "string"), want);
+        assert!(paths.is_namespace("t.ts", "./lib::z"));
+        assert!(!paths.is_namespace("t.ts", "./lib::nope"));
     }
 
     #[test]
