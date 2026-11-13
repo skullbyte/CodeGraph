@@ -363,6 +363,7 @@ mod tests {
             signature: format!("fn {name}()"),
             container: None,
             returns: None,
+            bases: Vec::new(),
         }
     }
 

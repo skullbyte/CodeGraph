@@ -472,6 +472,7 @@ mod tests {
             signature: String::new(),
             container: None,
             returns: None,
+            bases: Vec::new(),
         }
     }
 

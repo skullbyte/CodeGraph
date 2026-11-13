@@ -60,6 +60,7 @@ pub fn extract(src: &str) -> Facts {
                         .collect(),
                     container: None,
                     returns: None,
+                    bases: Vec::new(),
                 });
                 scan.inline(title, line);
                 continue;

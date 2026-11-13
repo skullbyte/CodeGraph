@@ -10,12 +10,12 @@ use crate::model::{Call, Form, Hop, Kind, Ret, Symbol};
 pub fn extract(root: Node, src: &str) -> Facts {
     let mut facts = Facts::default();
     let modules = module_names(root, src);
-    let empty = Locals::new();
+    let top = local_types(root, src, &Locals::new());
     let ctx = Ctx {
         enclosing: None,
         container: None,
         modules: &modules,
-        locals: &empty,
+        locals: &top,
         fields: None,
     };
     visit(root, src, &mut facts, ctx);
@@ -32,13 +32,21 @@ struct Ctx<'a> {
     enclosing: Option<&'a str>,
     container: Option<&'a str>,
     modules: &'a HashMap<String, String>,
-    locals: &'a Locals,
+    locals: &'a Locals<'a>,
     fields: Option<&'a Types>,
 }
 
 type Types = HashMap<String, String>;
-/// Declared names in reach: `Some(type)`, or `None` when the name is declared but its type unknown.
-type Locals = HashMap<String, Option<String>>;
+/// Declared names in reach: what each holds, or `None` when the name is declared but unknown.
+type Locals<'a> = HashMap<String, Option<Known<'a>>>;
+
+/// What a declared name holds: an instance of a class (`x: Foo`, `new Foo()`), or the value of
+/// `const x = <expression>`, read as a call chain only where `x` is used.
+#[derive(Clone, PartialEq)]
+enum Known<'a> {
+    Class(String),
+    Value(Node<'a>),
+}
 
 const FUNCTIONS: [&str; 5] = [
     "function_declaration",
@@ -201,6 +209,53 @@ fn declarator_name<'a>(class: Node, src: &'a str) -> Option<&'a str> {
 }
 
 /// The node whose text starts the declaration: the `export ...` wrapper when there is one.
+/// Names of the classes and interfaces `node` extends or implements: `extends ns.A<T>` gives
+/// `A`; a computed base (`extends mixin(D)`) gives nothing.
+fn bases_of(node: Node, src: &str) -> Vec<String> {
+    let none = HashSet::new();
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let mut inner = child.walk();
+        match child.kind() {
+            "class_heritage" => {
+                for clause in child.named_children(&mut inner) {
+                    let mut c = clause.walk();
+                    match clause.kind() {
+                        "extends_clause" => out.extend(
+                            clause
+                                .children_by_field_name("value", &mut c)
+                                .filter_map(|v| class_name(v, src)),
+                        ),
+                        "implements_clause" => out.extend(
+                            clause
+                                .named_children(&mut c)
+                                .filter_map(|t| type_name(t, src, &none)),
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            "extends_type_clause" => out.extend(
+                child
+                    .children_by_field_name("type", &mut inner)
+                    .filter_map(|t| type_name(t, src, &none)),
+            ),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `A` or `ns.A` written as a value: the class name `A`.
+fn class_name(node: Node, src: &str) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(text(node, src).to_string()),
+        "member_expression" => field_text(node, "property", src).map(String::from),
+        _ => None,
+    }
+}
+
 fn decl_start(node: Node) -> Node {
     let mut top = node;
     while let Some(p) = top
@@ -254,7 +309,19 @@ fn add_item(
             signature: sig.clone(),
             container: container.map(String::from),
             returns: returns_of(node, src, container),
+            bases: bases_of(node, src),
         });
+    } else if matches!(node.kind(), "function_signature" | "method_signature") {
+        // Overloads that return different classes: which one a call gets is unknown.
+        let returns = returns_of(node, src, container);
+        let group = facts
+            .symbols
+            .iter_mut()
+            .rev()
+            .find(|s| s.name == name && s.container.as_deref() == container);
+        if let Some(first) = group.filter(|f| f.returns != returns) {
+            first.returns = None;
+        }
     }
     Some(sig)
 }
@@ -309,6 +376,7 @@ fn add_variable(node: Node, src: &str, facts: &mut Facts) -> Option<String> {
             signature: sig.clone(),
             container: None,
             returns: function.and_then(|f| returns_of(f, src, None)),
+            bases: Vec::new(),
         });
     }
     function.map(|_| caller_name(&sig))
@@ -475,7 +543,13 @@ fn call_form(function: Node, src: &str, ctx: Ctx, depth: usize) -> Form {
         "identifier" => {
             let name = text(object, src);
             if let Some(declared) = ctx.locals.get(name) {
-                declared.clone().map_or(Form::Method, Form::Type)
+                match declared {
+                    Some(Known::Class(t)) => Form::Type(t.clone()),
+                    // `const s = a.b(); s.f()` is `a.b().f()`; `const a = a.f()` stops at MAX_CHAIN.
+                    Some(Known::Value(value)) => hop_of(*value, src, ctx, depth + 1)
+                        .map_or(Form::Method, |h| Form::Returned(Box::new(h))),
+                    None => Form::Method,
+                }
             } else if name.starts_with(|c: char| c.is_ascii_uppercase()) {
                 Form::Type(name.to_string()) // a class, even when imported
             } else if let Some(m) = modules.get(name) {
@@ -613,12 +687,13 @@ fn bound_names(pattern: Node, src: &str, out: &mut Vec<String>) {
 }
 
 /// Types of the parameters and variables a function declares itself (not in nested functions),
-/// on top of those of the functions around it. A name declared again without a type, with
-/// another type, or inside a destructuring pattern is unknown: better no type than a wrong one.
-fn local_types(func: Node, src: &str, outer: &Locals) -> Locals {
+/// on top of those of the functions around it; for the whole file (`program`), the top-level ones.
+/// A name declared again without a type, with another type or value, or inside a destructuring
+/// pattern is unknown: better no type than a wrong one.
+fn local_types<'a>(func: Node<'a>, src: &str, outer: &Locals<'a>) -> Locals<'a> {
     let generics = generic_names(func, src);
-    let mut own: HashMap<String, Option<String>> = HashMap::new();
-    let mut declare = |name: String, ty: Option<String>| {
+    let mut own: Locals = HashMap::new();
+    let mut declare = |name: String, ty: Option<Known<'a>>| {
         own.entry(name)
             .and_modify(|seen| {
                 if *seen != ty {
@@ -648,12 +723,18 @@ fn local_types(func: Node, src: &str, outer: &Locals) -> Locals {
             bound_names(untyped, src, &mut names);
             names.into_iter().for_each(|name| declare(name, None));
         }
+        // `const Foo = require('./foo')` is a module, not a value.
+        let required = n
+            .child_by_field_name("value")
+            .is_some_and(|v| is_require(v, src));
         if let Some(pattern) = pattern {
             if pattern.kind() == "identifier" {
-                declare(
-                    text(pattern, src).to_string(),
-                    declared_type(n, src, &generics),
-                );
+                let name = text(pattern, src);
+                // A required module that shadows nothing is left out, so the class rule reads it.
+                if !(required && !outer.contains_key(name)) {
+                    let held = known(n, src, &generics).filter(|_| !required);
+                    declare(name.to_string(), held);
+                }
             } else {
                 let mut names = Vec::new();
                 bound_names(pattern, src, &mut names);
@@ -662,16 +743,61 @@ fn local_types(func: Node, src: &str, outer: &Locals) -> Locals {
         }
         let mut cursor = n.walk();
         let children: Vec<_> = n.named_children(&mut cursor).collect();
-        stack.extend(
-            children
-                .into_iter()
-                .rev()
-                .filter(|c| n == func || !(FUNCTIONS.contains(&c.kind()) || is_type(c.kind()))),
-        );
+        stack.extend(children.into_iter().rev().filter(|c| {
+            (n == func && n.kind() != "program")
+                || !(FUNCTIONS.contains(&c.kind()) || is_type(c.kind()))
+        }));
     }
     let mut all = outer.clone();
+    // An outer value read in here would see this function's names instead of its own.
+    for known in all.values_mut() {
+        if let Some(Known::Value(value)) = known
+            && mentions(*value, src, &own)
+        {
+            *known = None;
+        }
+    }
     all.extend(own);
     all
+}
+
+/// Whether `node` uses any of `names` as a plain identifier.
+fn mentions(node: Node, src: &str, names: &Locals) -> bool {
+    if names.is_empty() {
+        return false;
+    }
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "identifier" && names.contains_key(text(n, src)) {
+            return true;
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+    false
+}
+
+/// `require(...)`, the CommonJS import.
+fn is_require(node: Node, src: &str) -> bool {
+    node.kind() == "call_expression"
+        && node
+            .child_by_field_name("function")
+            .is_some_and(|f| f.kind() == "identifier" && text(f, src) == "require")
+}
+
+/// What a declared name holds: its type (see `declared_type`), else the value of an unannotated
+/// `const` (a `let` may be reassigned).
+fn known<'a>(node: Node<'a>, src: &str, generics: &HashSet<String>) -> Option<Known<'a>> {
+    if let Some(t) = declared_type(node, src, generics) {
+        return Some(Known::Class(t));
+    }
+    let constant = node
+        .parent()
+        .and_then(|d| d.child_by_field_name("kind"))
+        .is_some_and(|k| k.kind() == "const");
+    node.child_by_field_name("value")
+        .filter(|_| constant && node.child_by_field_name("type").is_none())
+        .map(Known::Value)
 }
 
 /// Types of a class's fields (`repo: Repo`, `log = new Logger()`) and constructor parameter
@@ -853,6 +979,30 @@ function local() { show(1); }
             .collect()
     }
 
+    #[test]
+    fn classes_and_interfaces_keep_what_they_extend_and_implement() {
+        let src = "class B extends ns.A<T> implements I, J<K> {}
+interface X extends Y, ns.Z<T> {}
+class C extends mixin(D) {}
+class E {}
+";
+        let facts = extract_file(Lang::TypeScript, src).unwrap();
+        let got: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.bases.join(",")))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("B", "A,I,J".into()),
+                ("X", "Y,Z".into()),
+                ("C", String::new()),
+                ("E", String::new())
+            ]
+        );
+    }
+
     fn sym(name: &str, container: Option<&str>, line: u32) -> (String, Option<String>, u32) {
         (name.into(), container.map(String::from), line)
     }
@@ -898,6 +1048,9 @@ function make(): ns.Builder {}
 export function over(a: string): One;
 export function over(a: number): Two;
 export function over(a: any) {}
+export function same(a: string): One;
+export function same(a: number): One;
+export function same(a: any): One { return a; }
 export const mk = (): Thing => new Thing();
 ";
         let facts = extract_file(Lang::TypeScript, src).unwrap();
@@ -922,7 +1075,8 @@ export const mk = (): Thing => new Thing();
                 ("none", None),
                 ("opt", Some(("I", false))),
                 ("make", Some(("Builder", false))),
-                ("over", Some(("One", false))),
+                ("over", None),
+                ("same", Some(("One", false))),
                 ("mk", Some(("Thing", false))),
             ]
         );
@@ -1074,6 +1228,111 @@ async function f() {
                 ("Foo".into(), Form::Bare),
             ]
         );
+    }
+
+    #[test]
+    fn a_value_made_by_a_call_keeps_the_chain_even_at_top_level() {
+        let src = "import * as z from './z';
+const Test = z.object();
+Test.parse();
+class Real {}
+Real.make();
+function f() {
+  const s = Test.extend();
+  s.run();
+  const t = s.pick();
+  t.go();
+}
+";
+        let z = || Form::Module("z".into());
+        let object = || hop("object", z(), false);
+        let extend = || hop("extend", object(), false);
+        let pick = || hop("pick", extend(), false);
+        let got: Vec<_> = call_forms(src)
+            .into_iter()
+            .filter(|(c, _)| ["parse", "make", "run", "go"].contains(&c.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("parse".to_string(), object()),
+                typed("make", "Real"),
+                ("run".into(), extend()),
+                ("go".into(), pick()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_made_local_yields_to_its_annotation_a_second_value_and_await() {
+        let src = "async function f() {
+  const x: Foo = make();
+  x.a();
+  { const d = one(); }
+  { const d = two(); }
+  d.b();
+  const r = await load();
+  r.run();
+}
+";
+        let got: Vec<_> = call_forms(src)
+            .into_iter()
+            .filter(|(c, _)| ["a", "b", "run"].contains(&c.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                typed("a", "Foo"),
+                method("b"),
+                ("run".into(), hop("load", Form::Bare, true)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_value_whose_names_are_shadowed_where_it_is_used_is_unknown() {
+        let src = "import * as z from './z';
+const T = z.object();
+function h(z: Other) {
+  T.parse();
+}
+function f(a: Foo) {
+  const s = a.b();
+  function g(a: Bar) {
+    s.run();
+  }
+  s.go();
+}
+";
+        let got: Vec<_> = call_forms(src)
+            .into_iter()
+            .filter(|(c, _)| ["parse", "run", "go"].contains(&c.as_str()))
+            .collect();
+        let b = hop("b", Form::Type("Foo".into()), false);
+        assert_eq!(got, vec![method("parse"), method("run"), ("go".into(), b)]);
+    }
+
+    #[test]
+    fn a_required_module_keeps_the_class_rule() {
+        let src = "const Foo = require('./foo');\nfunction f() {\n  Foo.bar();\n}\n";
+        let got: Vec<_> = call_forms(src)
+            .into_iter()
+            .filter(|(c, _)| c == "bar")
+            .collect();
+        assert_eq!(got, vec![typed("bar", "Foo")]);
+        // ... but it still hides an outer name it shadows.
+        let src = "function f(db: Db) {\n  function g() {\n    const db = require('./db');\n    db.q();\n  }\n}\n";
+        let got: Vec<_> = call_forms(src)
+            .into_iter()
+            .filter(|(c, _)| c == "q")
+            .collect();
+        assert_eq!(got, vec![method("q")]);
+    }
+
+    #[test]
+    fn a_local_made_from_itself_ends() {
+        let got = call_forms("function f() {\n  const a = a.f();\n  a.g();\n}\n");
+        assert!(got.iter().any(|(c, _)| c == "g"), "{got:?}");
     }
 
     #[test]

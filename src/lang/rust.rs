@@ -278,6 +278,7 @@ fn add_item(
         returns: (kind == Kind::Fn)
             .then(|| returns_of(node, src, container))
             .flatten(),
+        bases: Vec::new(),
     });
     Some(sig)
 }
@@ -382,6 +383,7 @@ fn add_impl(node: Node, src: &str, facts: &mut Facts) {
         signature: signature(node, node.child_by_field_name("body"), src),
         container: None,
         returns: None,
+        bases: Vec::new(),
     });
 }
 

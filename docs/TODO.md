@@ -10,6 +10,9 @@ Rules stay the same: failing test first, `just check`, `code-reviewer` loop, no 
   So remaining time is in our own code and file formats, not compiler flags.
 - Weak spots found: token cost of our own docs, stale installed binary / no SCIP data in this repo, cold index 2x slower than the older notes, files that grew too big.
 
+## 0. TOP PRIORITY (user, 2026-11-12): do before anything else, even before finishing E1
+- [x] 00. Done 2026-11-13: `.claude/rules/{html,typescript,rust,scip}.md` with `paths:` (CLAUDE.md 5.1 -> 4.4 KB, PROGRESS 19 -> 16 KB). Was: Split rules per folder/language so they load only when that code is touched. First check that `.claude/rules/*.md` with `paths:` frontmatter loads in this Claude Code version; else use a nested `CLAUDE.md` per folder. Back up `CLAUDE.md` and `docs/PROGRESS.md` first. Move: page rules -> `src/html/CLAUDE.md`; TS/zod gotchas + scip-typescript measuring -> `.claude/rules/typescript.md` (`src/lang/typescript.rs`); tokio, rust-analyzer scip, tree-sitter-rust traps -> `.claude/rules/rust.md`; SCIP indexer locations -> `.claude/rules/scip.md` (`src/scip.rs`, `src/scope.rs`). Then shorten root `CLAUDE.md` and PROGRESS Gotchas.
+
 ## A. Token savers (do first: they make every later session cheaper)
 - [x] A1. Done 2026-11-12 (55.8 KB -> under 15 KB; history in `docs/HISTORY.md`, CLAUDE.md updated). Was: Split `docs/PROGRESS.md`. It is ~60 KB (lines of 1-3 KB) and CLAUDE.md says to read it at the start of every task: ~20k tokens each session. Move `## Decisions` and the dated lines of `## Gotchas` to `docs/HISTORY.md` (read only on demand, with `rg`); keep in PROGRESS.md only Now, Checklist, parity table and the short gotchas. Update the `handoff` skill and CLAUDE.md to say where dated notes go. Check: `wc -c docs/PROGRESS.md` under 10 KB.
 - [x] A2. Done 2026-11-12 (old lines moved to HISTORY, this file is the single list). Was: Merge the duplicate lists in the PROGRESS checklist (lines 18-23 repeat the same open items three times) into one list. Fold this TODO in or point to it.
@@ -36,7 +39,8 @@ Rules stay the same: failing test first, `just check`, `code-reviewer` loop, no 
 - [ ] D4. Untested paths: `benchmark` with Graphify, `benchmark --json`, weighted multi-level Louvain.
 
 ## E. Precision (the user's top goal; hardest items, best done with the strongest model)
-- [ ] E1. TS return-type chains (`z.string().optional()`): zod is 8% right. Rust already has `Ret`/`Form::Returned`; port the same design to `src/lang/typescript.rs`.
+- [x] E1. Done 2026-11-13 (steps 1-4: return types, chains, call-made locals incl. top level, `Symbol.bases` + `members_up`, VERSION 10). zod form 8% -> 9% right, wrong 8% unchanged; type calls 4% -> 88% right; chains 7737 calls at 5% right / 0% wrong (blocked by E1b). tokio and this repo unchanged.
+- [ ] E1b. TS package self-imports: `import * as z from "zod/v4"` gives `Module("v4")`, which matches both `v4/classic` and `v4/mini` `string()` (different return types), so 5.2k zod chains stop at their first hop. Map a package's own name (package.json `name` + `exports`) to its files; also `Module("util")` matching v3 and v4 util files. Also `import { z } from "zod/v3"` (a named import of a namespace object) is not a module at all.
 - [ ] E2. Rust type identity: several `Builder`/`Runtime` types share a name (3,517 tokio calls). Needs type = (file, name), not name.
 - [ ] E3. Rust `macro_rules!` definitions as symbols (1,122 unscored tokio answers) and receivers inside macro arguments (2,845 misses).
 - [ ] E4. Fields of generic structs; tuple patterns after `..`.

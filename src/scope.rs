@@ -47,6 +47,8 @@ pub struct Resolver {
     aliased: HashSet<String>,
     /// Names declared as a struct, enum or class: the only kinds an extension trait is added to.
     nominal: HashSet<String>,
+    /// Type name -> the types it extends or implements (every declaration of that name).
+    bases: HashMap<String, Vec<String>>,
 }
 
 /// The class a call returns, and the files of the functions that return it.
@@ -58,12 +60,8 @@ struct Typed {
 /// Longest call chain followed; a longer one is read as a plain method call.
 const MAX_CHAIN: usize = 32;
 
-/// Indexes into `defs` whose container is `ty`.
-fn members_of(defs: &[Def], ty: &str) -> Vec<usize> {
-    (0..defs.len())
-        .filter(|&i| defs[i].container.as_deref() == Some(ty))
-        .collect()
-}
+/// Deepest base class level searched for a member a type does not declare itself.
+const MAX_BASES: usize = 16;
 
 /// The definition a symbol of `file` stands for.
 pub fn def_of(file: &FileEntry, s: &Symbol) -> Def {
@@ -108,8 +106,15 @@ impl Resolver {
         let mut traits = HashSet::new();
         let mut aliased = HashSet::new();
         let mut nominal = HashSet::new();
+        let mut bases: HashMap<String, Vec<String>> = HashMap::new();
         for file in index.files.values() {
             for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
+                if !s.bases.is_empty() {
+                    let known = bases.entry(s.name.clone()).or_default();
+                    known.extend(s.bases.iter().filter(|b| **b != s.name).cloned());
+                    known.sort();
+                    known.dedup();
+                }
                 if s.kind == Kind::Trait {
                     traits.insert(s.name.clone());
                 }
@@ -134,7 +139,39 @@ impl Resolver {
             traits,
             aliased,
             nominal,
+            bases,
         }
+    }
+
+    /// Indexes into `defs` that are members of `ty`; when it has none, of its nearest bases that
+    /// have some (all bases of one level together; cycles and deep trees end).
+    fn members_up(&self, defs: &[Def], ty: &str) -> Vec<usize> {
+        let mut seen: HashSet<&str> = HashSet::from([ty]);
+        let mut level = vec![ty];
+        for _ in 0..MAX_BASES {
+            let found: Vec<usize> = (0..defs.len())
+                .filter(|&i| {
+                    defs[i]
+                        .container
+                        .as_deref()
+                        .is_some_and(|c| level.contains(&c))
+                })
+                .collect();
+            if !found.is_empty() {
+                return found;
+            }
+            level = level
+                .iter()
+                .filter_map(|t| self.bases.get(*t))
+                .flatten()
+                .map(String::as_str)
+                .filter(|b| seen.insert(b))
+                .collect();
+            if level.is_empty() {
+                break;
+            }
+        }
+        Vec::new()
     }
 
     /// The class an earlier call in a chain returns: resolve that call, and when every definition
@@ -153,14 +190,14 @@ impl Resolver {
                 self.members_typed(defs, &ty)
             }
             Form::Type(ty) => {
-                let plain = plain_type(ty);
+                let up = self.members_up(defs, plain_type(ty));
                 self.resolve_form(from, &hop.callee, &hop.form, owner, defs, depth + 1)
                     .into_iter()
-                    .filter(|&i| defs[i].container.as_deref() == Some(plain))
+                    .filter(|i| up.contains(i))
                     .collect()
             }
             // The wider fallback of `resolve_form` may not decide a type: keep real matches only.
-            Form::SelfRef => owner.map_or_else(Vec::new, |o| members_of(defs, o)),
+            Form::SelfRef => owner.map_or_else(Vec::new, |o| self.members_up(defs, o)),
             Form::Bare | Form::Module(_) => self
                 .resolve_form(from, &hop.callee, &hop.form, owner, defs, depth + 1)
                 .into_iter()
@@ -192,7 +229,7 @@ impl Resolver {
     /// vs `oneshot::Sender`): a member goes only when it is a rival from the point of view of every
     /// file that returns the class. Never empties the set.
     fn members_typed(&self, defs: &[Def], typed: &Typed) -> Vec<usize> {
-        let members = members_of(defs, &typed.ty);
+        let members = self.members_up(defs, &typed.ty);
         let rivals: Vec<(Vec<String>, Vec<String>)> = typed
             .froms
             .iter()
@@ -269,7 +306,7 @@ impl Resolver {
         depth: usize,
     ) -> Vec<usize> {
         let all = || (0..defs.len()).collect::<Vec<_>>();
-        let of_type = |t: &str| members_of(defs, t);
+        let of_type = |t: &str| self.members_up(defs, t);
         let narrowed = |set: Vec<usize>| if set.is_empty() { all() } else { set };
         match form {
             Form::Returned(hop) => match self.hop_type(from, hop, owner, depth) {
@@ -621,6 +658,7 @@ mod tests {
             signature: String::new(),
             container: c.map(String::from),
             returns: None,
+            bases: Vec::new(),
         };
         let entry = |path: &str, uses: &[(&str, &str)], symbols: Vec<Symbol>| FileEntry {
             path: path.into(),
@@ -666,6 +704,7 @@ mod tests {
             signature: String::new(),
             container: None,
             returns: None,
+            bases: Vec::new(),
         };
         let r = Resolver::new(&index(vec![
             FileEntry {
@@ -687,6 +726,7 @@ mod tests {
                     signature: String::new(),
                     container: None,
                     returns: None,
+                    bases: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -723,6 +763,7 @@ mod tests {
                 signature: String::new(),
                 container: None,
                 returns: None,
+                bases: Vec::new(),
             }],
             ..Default::default()
         };
@@ -763,6 +804,7 @@ mod tests {
             signature: String::new(),
             container: None,
             returns: None,
+            bases: Vec::new(),
         };
         let r = Resolver::new(&index(vec![FileEntry {
             path: "t.rs".into(),
@@ -846,6 +888,7 @@ mod tests {
                 signature: String::new(),
                 container: None,
                 returns: None,
+                bases: Vec::new(),
             }],
             ..Default::default()
         };
@@ -888,6 +931,7 @@ mod tests {
             signature: String::new(),
             container: None,
             returns,
+            bases: Vec::new(),
         };
         let ret = Ret {
             ty: "Sender".into(),
@@ -935,6 +979,7 @@ mod tests {
                 signature: String::new(),
                 container: None,
                 returns: None,
+                bases: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1130,6 +1175,7 @@ mod tests {
                         future,
                     }
                 }),
+                bases: Vec::new(),
             })
             .collect();
         Resolver::new(&index(vec![f]))
@@ -1165,6 +1211,48 @@ mod tests {
         // SCIP names something we do not list: the form decides.
         assert_eq!(r.candidates("src/a.rs", &c, Some(&at(9)), &defs), vec![0]);
         assert_eq!(r.candidates("src/a.rs", &c, None, &defs), vec![0]);
+    }
+
+    #[test]
+    fn a_member_missing_on_a_type_is_looked_up_in_its_bases() {
+        use crate::model::{Kind, Symbol};
+        let sym = |name: &str, line, kind, bases: &[&str], returns| Symbol {
+            name: name.into(),
+            kind,
+            line,
+            signature: String::new(),
+            container: None,
+            returns,
+            bases: bases.iter().map(|b| b.to_string()).collect(),
+        };
+        let mut f = file("src/a.ts", &[]);
+        let b = Ret {
+            ty: "B".into(),
+            ..Default::default()
+        };
+        f.symbols = vec![
+            sym("A", 1, Kind::Class, &[], None),
+            sym("B", 2, Kind::Class, &["A"], None),
+            sym("C", 3, Kind::Class, &["D"], None), // a cycle
+            sym("D", 4, Kind::Class, &["C"], None),
+            sym("make", 5, Kind::Fn, &[], Some(b)),
+        ];
+        let r = Resolver::new(&index(vec![f]));
+        let d = vec![
+            in_type("src/a.ts", 10, "A"),
+            in_type("src/b.ts", 20, "Other"),
+        ];
+        let made = chained(Form::Returned(hop("make", Form::Bare, false)));
+        assert_eq!(r.resolve("src/a.ts", &made, &d), vec![0]);
+        assert_eq!(
+            r.resolve("src/a.ts", &chained(Form::Type("B".into())), &d),
+            vec![0]
+        );
+        // A cycle without the member ends and keeps every definition.
+        assert_eq!(
+            r.resolve("src/a.ts", &chained(Form::Type("C".into())), &d),
+            vec![0, 1]
+        );
     }
 
     #[test]

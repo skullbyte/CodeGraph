@@ -106,6 +106,7 @@ fn add_item(
             signature: sig.trim_end_matches([':', ';', ' ']).to_string(),
             container: container.map(String::from),
             returns: None,
+            bases: Vec::new(),
         });
     }
     names

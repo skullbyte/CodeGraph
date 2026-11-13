@@ -1,11 +1,14 @@
 # codegraph progress
 
 ## Now
-Session 2026-11-12: all committed and pushed (up to 98b3143), `just check` green (493 lib + 44 cli tests). Done: A3, B2 (`codegraph stats` + SCIP hint), C0 (partial SCIP re-apply 96 -> 65 ms; no rewrite of an unchanged graph 48 -> 32 ms).
-Goal now: precision first (user's order), speed (C1-C3) after. Order: E1 -> E2 -> E3; E5 only with the user's OK per SCIP indexer.
-Next step: E1, TS return-type chains (zod 8% right): plan mode first; port Rust's `Ret`/`Form::Returned` design to `src/lang/typescript.rs`; measure zod before/after (scip-typescript in `bench/real/zod/packages/zod`, see Gotchas).
+Task: E1, plan `~/.claude/plans/refactored-cooking-umbrella.md` (approved 2026-11-12, 4 steps). Steps 1+2 committed in bd020c2 (not pushed): TS `returns_of` + `hop_of`/`Form::Returned` in `call_form`; `just check` green (495 lib + 44 cli).
+zod after 1+2: form still 8% right / 8% wrong; new "chain" row 3866 calls: 6% right, 0% wrong, 94% narrowed (needs step 4, inheritance).
+E1 steps 3+4 done 2026-11-13, uncommitted (with TODO 00): call-made `const` locals (`Known::{Class, Value(Node)}`, top level too) and inheritance (`Symbol.bases` from TS extends/implements, `Resolver::members_up`, VERSION 10); `just check` green (500 lib + 44 cli), binary installed.
+zod: form right 9% / wrong 8% (was 8/8); type 88% right (was 4%); chain 7737 calls 5% right / 0% wrong: blocked by package self-imports (TODO E1b). tokio 64/0 and this repo 97/0 unchanged.
+code-reviewer: 3 rounds, ends "no remaining issues" (fixed: shadowed names in a stored value, overloads with different returns, `require` locals); `just check` 502 lib + 44 cli.
+Next step: commit (ask the user: TODO 00 rules split, then E1 steps 3+4), then E1b or E2.
 Scores (tokio form): right 64% / wrong 0% / narrowed 22% / lost 0%; this repo 97% right; zod 8%. SCIP on this repo: 14454 of 14973 calls resolved (2026-11-12).
-`origin` = github.com/skullbyte/CodeGraph; `main` tracks `origin/main`, pushed up to 98b3143 (user pushes with `! git push`).
+`origin` = github.com/skullbyte/CodeGraph; `main` tracks `origin/main`, pushed up to 98b3143, bd020c2 local only (user pushes with `! git push`).
 Rules: tests first, model `opusplan` (opus only for hard tasks, chosen before the first message), `code-reviewer` (sonnet, diff only, max 3 rounds) until "no remaining issues", commit by file name, no AI attribution, never push unless asked, `cargo add` only by the user with `!`.
 
 ## Checklist
@@ -16,7 +19,7 @@ Rules: tests first, model `opusplan` (opus only for hard tasks, chosen before th
 - [~] Part B: full Graphify parity
   - [x] round 1: `query` (5f76a49), `tour` (62d7c39), `--teach` (24f6bf2 + 0e68c28)
   - [ ] round 2, in the user's order: [ ] more languages: [x] Kotlin, [x] PHP, [x] Ruby, [x] Swift (one commit each, plan ~/.claude/plans/swirling-cooking-robin.md); [ ] big-graph html view (aggregated above 5000 nodes, --node-limit, --no-viz); [ ] Obsidian `canvas` export; [ ] `label` (LLM-named communities) + `save-result`/`reflect`
-  - [~] precision plan 2 (~/.claude/plans/synthetic-foraging-milner.md): [x] TS steps 1-4 (d851158, 4c0f85d, 8a759ec); [x] generic walker container/owner/form + Python (131a8c3); [x] `explain` modes (ad42b5f); [x] Rust receiver types (2d9efdb); [x] call chains via return types; [x] `--def` filter (wired into callers/explain); [ ] file explain; [ ] TS return types for chains; [ ] forms for Java/Kotlin/Go/C#/C++/Ruby/PHP/Swift (needs SCIP truth, blocked, see Now); [ ] Dart/Flutter
+  - [~] precision plan 2 (~/.claude/plans/synthetic-foraging-milner.md): [x] TS steps 1-4 (d851158, 4c0f85d, 8a759ec); [x] generic walker container/owner/form + Python (131a8c3); [x] `explain` modes (ad42b5f); [x] Rust receiver types (2d9efdb); [x] call chains via return types; [x] `--def` filter (wired into callers/explain); [ ] file explain; [x] E1 TS return types for chains: [x] 1 return types, [x] 2 chains (bd020c2), [x] 3 call-made locals incl. top level, [x] 4 inheritance (`bases`, `members_up`); [ ] forms for Java/Kotlin/Go/C#/C++/Ruby/PHP/Swift (needs SCIP truth, blocked, see Now); [ ] Dart/Flutter
   - [x] 2026-11-02: `callers`/`explain` use the resolver + `--def`; `scip --run` + saved-SCIP re-apply in `index`; `update` delta log (7 ms)
 - Open items, in priority order: `docs/TODO.md` (the single list; older duplicate lines are in `docs/HISTORY.md`)
 
@@ -84,32 +87,26 @@ New decisions go here, one dated line each; older ones are in `docs/HISTORY.md` 
 - 2026-11-12 workflow: default model `opusplan`, `/model opus` only before a hard task (a mid-session switch re-reads the whole context uncached); all subagents incl. `code-reviewer` on sonnet, diff only, max 3 rounds; global CLAUDE.md uses `codegraph` for code search in every project (callers.sh retired)
 - 2026-11-12 priority: precision of languages before more speed work (user): E1 TS chains, E2 Rust type identity, E3 macro_rules; then C3, C1/C2
 - 2026-11-12 `index` re-matches SCIP calls only in re-parsed files and skips writing an unchanged graph; a SCIP file newer than graph.json forces both a full re-apply and a write: else its stamp keeps forcing a full re-apply
+- 2026-11-12 E1 includes inheritance (`Symbol.bases`, resolver walks bases when a type has no member of that name): zod misses show `parse` lives on base `ZodType`, so chains alone gain nothing (measured)
+- 2026-11-12 E1 out of scope, to TODO: `Module("util")` matching both v3 and v4 util files; two `ZodType`s (v3/v4) sharing a name
 - 2026-11-12 release profile tuning (fat LTO, codegen-units=1) measured: -1% index, -6% callers: not worth the build time; `strip` only saves 3 MB; never `panic = "abort"` (PDF reader uses catch_unwind)
 
 ## Gotchas
 - `cargo install` without `--locked` ignores Cargo.lock (pulled tree-sitter 0.27.2): use `just install`. `codegraph stats` (and MCP `stats`) warns when SCIP data is missing or stale
 - Pushing: ask the user to run `! git push` (Claude is denied, no `gh` login). Check `git remote -v` after any `set-url`: a stray trailing `.` once broke the URL
 - After `cargo fmt`, a literal `str.replace` on code can silently miss (fmt reflows lists/calls): twice a reviewed fix was not applied. Check with `rg` that every scripted edit landed; prefer slices over fixed-size arrays for name lists
-- SCIP indexers live in ~/.local/bin (scip-go, scip-java, scip-clang, scip-ruby), npm -g (scip-typescript, scip-python), ~/.dotnet/tools (scip-dotnet, not on PATH). Run indexers in the repo root; for zod run in `bench/real/zod/packages/zod` (`scip-typescript index --no-progress-bar`; `--pnpm-workspaces` fails). After every `cargo install` the fingerprint changes: re-run `codegraph index && codegraph scip` before `codegraph precision` (tokio: `cd bench/tokio`)
 - Linux file times advance in coarse clock ticks (a few ms): tests comparing mtimes must sleep ~50 ms between writes. Multi-line `sd -F` patterns silently fail to match: use Edit
 - Reviewer subagents sometimes edit the file to probe: check `git diff --stat` and run `just check` before committing
 - tree-sitter grammar field names differ per version: check `node-types.json` in ~/.cargo/registry/src/*/tree-sitter-<lang>-*/src (e.g. rust `type_parameters` children are `type_parameter`)
 - Scratchpad analysis scripts (byform.py, meth*.py, barewrong.py, chainshare.py, score.py, unscored.py) are in the session scratchpad and not kept
-- Graphify-vs-SCIP scoring script (not kept): for each Graphify `calls` edge take caller file + `source_location` line + target node file/line, look up our call at that line in `.claude/graph.json` (`resolved` after `codegraph scip`), right = same file and def line within 5
 - zsh does not split a string variable into words: use arrays (`d=(--dir x)`, `"${d[@]}"`) in shell loops; `set -- $pe` with a space-joined pair breaks
-- `just check` is the gate; after a release rebuild every `.claude/graph.bin` is stale (fingerprint), so re-run `codegraph index` and `codegraph scip` before `codegraph precision`
-- SCIP truth: `rust-analyzer scip .` in the repo or in bench/tokio (27 s), then `codegraph scip`; `index.scip` is git-ignored; pizzeria (TS) is too small to score
 - Graphify, offline: `graphify extract <dir> --code-only --force --out <tmp>`; output `<tmp>/graphify-out/graph.json` (nodes with `source_file`, `label`; `links` with `relation`); scratchpad scripts `cmp.py`, `cls.py`, `rev.py`, `wrong.py`, `forms.py` live in the session scratchpad and are not kept
 - Real clones (git-ignored) are in `bench/real/`: okhttp, framework (laravel), rails, Alamofire, plus older gonet/gostd/glm/spring/graphify-py
 - A big string splice with `s[:a] + new + s[b:]` where `b < a` duplicates code; check function lists with `rg -n '^(fn|const|struct)' file` after such edits
 - `codegraph install` converts any line equal to the old codemap.sh command into `codegraph index`: check `.claude/settings.json` SessionStart after a reinstall
 - `paru -S` aborts the whole transaction when one package fails to download (difftastic did on the mirrors; a retry later worked); zsh aborts a command whose glob matches nothing before running it
-- Page work: edit only the part files in `src/html/` (js/01..10, style.css, template.html); `rg -c 'https?://|innerHTML|<img|url\(' src/html/` must print nothing; Rust tests fix `const DATA = /*DATA*/;` and `{{TITLE}}`
-- Brave tests: serve `bench/pizzeria/.claude` with `exec python3 -m http.server <port> --bind 127.0.0.1` as a background task; stop it by PID from `ss -ltnp` (`pkill -f` kills the shell, exit 144). Regenerate with `cargo build --release && ./target/release/codegraph index --dir bench/pizzeria && ./target/release/codegraph html --dir bench/pizzeria`
-- Impeccable files (`.claude/skills/impeccable/`, `.claude/agents/impeccable-*.md`, `.impeccable/`) are gitignored: commit by file name, never `git add -A`
-- Agent cost: a design pass ~160-215k tokens, a review 20-85k: keep jobs narrow; `fd` skips hidden dirs (use `-H`)
+- `fd` skips hidden dirs (use `-H`)
 - bench/ (git-ignored) holds tokio and a copy of pizzeria-emiliano; `rm -rf` is denied in settings, delete files one by one if needed
-- Bench numbers (release): tokio 814 files cold index ~55-70 ms, cached ~25 ms, update 1 file ~20 ms; notify_waiters 33 callers; def TcpListener -> tokio/src/net/tcp/listener.rs:57; pizzeria formatPrice 12 sites in 6 files
 - Every `cargo build` changes the executable fingerprint, so the next `index` is a full re-parse
 - zsh `time` has no "real" line: time with `bash -c` and `date +%s%N`
 - The auto-mode classifier blocked `cargo add`/downloads once; the user ran them with `!`
@@ -117,11 +114,9 @@ New decisions go here, one dated line each; older ones are in `docs/HISTORY.md` 
 - `tests/cli.rs::watch_*` runs the real binary with a 50 ms poll; it keeps the child's stdout reader alive (a closed pipe kills `watch`)
 - Hubs/path/explain on big repos are dominated by generic names (`new`, `clone`) until Phase 5
 - Phase 2 numbers (release): report tokio 53 ms (91 communities, biggest 179 files, name-match noise like `new_v4` links; Phase 5 fixes), pizzeria 2 ms (14 communities); benchmark: index tokio codegraph 44 ms vs graphify 4391 ms, pizzeria 3 vs 557 ms; explain formatPrice 144 tok/1 ms vs 313 tok/96 ms
-- `resolve_rust_module` fallback was O(imports x files) with string allocs per file; hoisted them (119 ms -> 13 ms on tokio)
 - To check later (open issues from the Phase 2 review, none block Phase 3):
   - unchecked `[]` lookups (`pos[..]`, `community_of[..]`, `index.files[..]`) in src/report.rs and src/community.rs: safe today, switch to `.get()` if the invariants change
   - untested: `benchmark` with Graphify installed, `benchmark --json`, multi-level Louvain with weighted edges
   - `benchmark` explain answers read the saved index, which can be older than the cold build it times
   - tokio communities are lumpy (biggest 179 files, name-match noise like `new_v4`): Phase 5 fixes the cause; Graphify's oversized-community split was skipped
 
-- tree-sitter-rust: a `mut_pattern`'s first named child is the `mut` keyword, find the `identifier` child; `_` in a tuple pattern is a child that must still count for indexes; filter comments and punctuation by kind

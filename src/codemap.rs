@@ -146,6 +146,7 @@ mod tests {
                     signature: (*sig).into(),
                     container: None,
                     returns: None,
+                    bases: Vec::new(),
                 })
                 .collect(),
             ..FileEntry::default()
@@ -221,6 +222,7 @@ mod tests {
                     signature: "pub fn parse(input: &str) -> Option<Temp>".into(),
                     container: None,
                     returns: None,
+                    bases: Vec::new(),
                 }],
                 ..FileEntry::default()
             },

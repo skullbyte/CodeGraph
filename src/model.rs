@@ -43,6 +43,10 @@ pub struct Symbol {
     /// What a function returns, when its signature names a plain class (`-> Self`, `-> Builder`).
     #[serde(default)]
     pub returns: Option<Ret>,
+    /// Classes and interfaces this type extends or implements (TS `extends A implements B`): where
+    /// a member it does not declare itself is looked up.
+    #[serde(default)]
+    pub bases: Vec<String>,
 }
 
 /// A returned class. `fallible`: the signature said `Result<T, _>` or `Option<T>`, so `ty` is `T`
@@ -262,6 +266,7 @@ mod tests {
                     future: true,
                     ..Default::default()
                 }),
+                bases: Vec::new(),
             }],
             calls: vec![Call {
                 callee: "run".into(),
