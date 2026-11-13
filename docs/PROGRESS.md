@@ -1,7 +1,7 @@
 # codegraph progress
 
 ## Now
-Goal: precision first (user). All work committed, NOT pushed: main is 13 commits ahead of origin (98b3143); last 29ec4ac. User pushes with `! git push`.
+Goal: precision first (user). All work committed and pushed (origin/main = 42e2d4b, 2026-11-14). User pushes with `! git push`.
 Done 2026-11-13/14: rules split (26e9973), E1 TS chains (17e58c6), E1b package names + re-exports `src/tspath.rs` (d6ac29b), bare-index namespace (a04b2c9), Rust inherent-before-trait (bf425b9), TS namespaces imported by name (5b71bd2).
 Scores (form strategy vs SCIP): zod 70% right / 1% wrong (was 8/8); tokio 67% / 0% (was 64/0); this repo 96% / 0%. `just check` green: 525 lib + 44 cli. Binary installed.
 Measure: zod `cd bench/real/zod/packages/zod && codegraph index && codegraph scip && codegraph precision`; tokio `cd bench/tokio && codegraph index && codegraph precision` (saved SCIP re-applied); misses: `codegraph precision --misses 100000 | rg '^miss <form>'`.
