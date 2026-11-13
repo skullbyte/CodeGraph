@@ -54,6 +54,97 @@ pub struct Resolver {
     bases: HashMap<String, Vec<String>>,
     /// Type name -> files that declare a type (class, interface, ...) of that name.
     type_files: HashMap<String, Vec<String>>,
+    /// Rust file -> line of a method -> where it is declared and how it is reached.
+    receivers: HashMap<String, HashMap<u32, Receiver>>,
+}
+
+/// A Rust method: the `impl` block it sits in and its receiver step.
+#[derive(Debug, Clone, PartialEq)]
+struct Receiver {
+    /// The block is `impl Trait for T`.
+    in_trait: bool,
+    /// The type as the block writes it (`Spawn<T>`): two blocks name one type only when equal.
+    target: String,
+    step: u8,
+}
+
+/// Where Rust's method lookup reaches a receiver: `self` 0, `&self` 1, `&mut self` 2, a typed
+/// one (`self: Pin<&mut Self>`) 3, only reached when written out; `None` for no `self`.
+fn receiver_step(signature: &str) -> Option<u8> {
+    let (_, params) = signature.split_once('(')?;
+    let first = params.split([',', ')']).next()?.trim();
+    let first = first.strip_prefix("mut ").unwrap_or(first);
+    if first == "self" {
+        return Some(0);
+    }
+    // `self: Self`, `self: &Self`, `self: &mut Self` are the plain steps; anything else is 3.
+    if let Some(ty) = first
+        .strip_prefix("self")
+        .map(str::trim_start)
+        .and_then(|t| t.strip_prefix(':'))
+    {
+        let ty = ty.trim();
+        if ty == "Self" {
+            return Some(0);
+        }
+        return Some(reference_step(ty, "Self").unwrap_or(3));
+    }
+    reference_step(first, "self")
+}
+
+/// `&x` is step 1 and `&mut x` step 2 (lifetimes allowed), for `x` = `name`.
+fn reference_step(text: &str, name: &str) -> Option<u8> {
+    let reference = text.strip_prefix('&')?;
+    let reference = match reference.strip_prefix('\'') {
+        Some(life) => life.split_once(' ')?.1,
+        None => reference,
+    };
+    let reference = reference.trim();
+    if reference == name {
+        Some(1)
+    } else if reference.strip_prefix("mut ").map(str::trim) == Some(name) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Each Rust method of `file` by line: declared in a trait impl or not, and its receiver step.
+/// A method belongs to the last `impl` block above it for its type.
+fn receivers_of(file: &FileEntry) -> HashMap<u32, Receiver> {
+    let mut symbols: Vec<&Symbol> = file.symbols.iter().collect();
+    symbols.sort_by_key(|s| s.line);
+    let mut current: Option<(&str, bool)> = None;
+    let mut out = HashMap::new();
+    for s in symbols {
+        if s.kind == Kind::Impl {
+            current = Some((s.name.as_str(), s.signature.contains(" for ")));
+            continue;
+        }
+        if s.container.is_none() && s.kind.is_type() {
+            current = None; // a trait, struct or enum: the impl block above has ended
+            continue;
+        }
+        let (Some((target, in_trait)), Some(container)) = (current, s.container.as_deref()) else {
+            continue;
+        };
+        let ty = target.split('<').next().unwrap_or(target);
+        if s.kind == Kind::Fn
+            && container == ty
+            && let Some(step) = receiver_step(&s.signature)
+        {
+            let target = target.to_string();
+            out.insert(
+                s.line,
+                Receiver {
+                    in_trait,
+                    target,
+                    step,
+                },
+            );
+        }
+    }
+    out
 }
 
 /// The class a call returns, and the files of the functions that return it.
@@ -113,6 +204,13 @@ impl Resolver {
         let mut nominal = HashSet::new();
         let mut bases: HashMap<String, Vec<String>> = HashMap::new();
         let mut type_files: HashMap<String, Vec<String>> = HashMap::new();
+        let receivers = index
+            .files
+            .values()
+            .filter(|f| matches!(Lang::from_path(&f.path), Some(Lang::Rust)))
+            .map(|f| (f.path.clone(), receivers_of(f)))
+            .filter(|(_, r)| !r.is_empty())
+            .collect();
         for file in index.files.values() {
             for s in file.symbols.iter().filter(|s| s.kind.is_code_def()) {
                 if s.kind.is_type() {
@@ -154,6 +252,7 @@ impl Resolver {
             nominal,
             bases,
             type_files,
+            receivers,
         }
     }
 
@@ -209,7 +308,7 @@ impl Resolver {
             Form::Method | Form::Unknown => return None,
             Form::Returned(inner) => {
                 let ty = self.hop_type(from, inner, owner, depth + 1)?;
-                self.members_typed(defs, &ty)
+                self.inherent_first(defs, self.members_typed(defs, &ty))
             }
             Form::Type(ty) => {
                 let up = self.members_up(defs, plain_type(ty), &[]);
@@ -342,13 +441,53 @@ impl Resolver {
         defs: &[Def],
         depth: usize,
     ) -> Vec<usize> {
+        let set = self.resolve_written(from, name, form, owner, defs, depth);
+        // Only a receiver of known type (a typed chain does it in `resolve_written`): an untyped
+        // one may be a `Pin<&mut T>`, which reaches a trait's `self: Pin<&mut Self>` method first.
+        match form {
+            Form::Type(_) | Form::SelfRef => self.inherent_first(defs, set),
+            _ => set,
+        }
+    }
+
+    /// Rust looks for a method among a type's own (inherent) methods before its traits' at each
+    /// receiver step: a trait method goes when an inherent one of the same type is reached at the
+    /// same or an earlier step (`Spawn::poll(&mut self)` hides `Future::poll(self: Pin<..>)`).
+    fn inherent_first(&self, defs: &[Def], set: Vec<usize>) -> Vec<usize> {
+        let receiver = |i: usize| {
+            let d = &defs[i];
+            self.receivers.get(&d.path)?.get(&d.line)
+        };
+        let hidden = |i: usize| {
+            let Some(r) = receiver(i).filter(|r| r.in_trait) else {
+                return false;
+            };
+            set.iter().any(|&j| {
+                defs[j].path == defs[i].path
+                    && receiver(j)
+                        .is_some_and(|o| !o.in_trait && o.target == r.target && o.step <= r.step)
+            })
+        };
+        let kept: Vec<usize> = set.iter().copied().filter(|&i| !hidden(i)).collect();
+        if kept.is_empty() { set } else { kept }
+    }
+
+    fn resolve_written(
+        &self,
+        from: &str,
+        name: &str,
+        form: &Form,
+        owner: Option<&str>,
+        defs: &[Def],
+        depth: usize,
+    ) -> Vec<usize> {
         let all = || (0..defs.len()).collect::<Vec<_>>();
         let of_type = |t: &str| self.members_up(defs, t, &[]);
         let narrowed = |set: Vec<usize>| if set.is_empty() { all() } else { set };
         match form {
             Form::Returned(hop) => match self.hop_type(from, hop, owner, depth) {
                 Some(t) => match self.members_typed(defs, &t) {
-                    members if !members.is_empty() => members,
+                    members if !members.is_empty() => self.inherent_first(defs, members),
                     // Not the trait fallback: a returned `Spawn<T>` reaches `T`'s methods by deref.
                     _ => self.resolve_form(from, name, &Form::Method, owner, defs, depth),
                 },
@@ -1250,6 +1389,118 @@ mod tests {
         // SCIP names something we do not list: the form decides.
         assert_eq!(r.candidates("src/a.rs", &c, Some(&at(9)), &defs), vec![0]);
         assert_eq!(r.candidates("src/a.rs", &c, None, &defs), vec![0]);
+    }
+
+    #[test]
+    fn an_inherent_method_wins_over_a_trait_method_of_the_same_type() {
+        let r = Resolver::new(&index(vec![FileEntry {
+            path: "src/task.rs".into(),
+            symbols: crate::lang::extract(
+                crate::lang::Lang::Rust,
+                "pub struct Spawn;\n\
+                 impl Spawn {\n    pub fn poll(&mut self) {}\n    pub fn get(&mut self) {}\n}\n\
+                 impl Future for Spawn {\n    fn poll(self: Pin<&mut Self>) {}\n}\n\
+                 impl Get for Spawn {\n    fn get(&self) {}\n}\n",
+            )
+            .unwrap()
+            .symbols,
+            ..Default::default()
+        }]));
+        let d = |a, b| {
+            vec![
+                in_type("src/task.rs", a, "Spawn"),
+                in_type("src/task.rs", b, "Spawn"),
+            ]
+        };
+        let named = |callee: &str, form| Call {
+            callee: callee.into(),
+            ..call(form, None)
+        };
+        let spawn = || Form::Type("Spawn".into());
+        // On a known `Spawn`, `Pin<&mut Self>` is not reached: the inherent `&mut self` one is.
+        assert_eq!(
+            r.resolve("src/task.rs", &named("poll", spawn()), &d(3, 7)),
+            vec![0]
+        );
+        // An untyped receiver may be a `Pin<&mut Spawn>`, which reaches the trait's first.
+        assert_eq!(
+            r.resolve("src/task.rs", &named("poll", Form::Method), &d(3, 7)),
+            vec![0, 1]
+        );
+        // Another file's `Spawn` is another type.
+        let other = vec![
+            in_type("src/task.rs", 3, "Spawn"),
+            in_type("src/other.rs", 7, "Spawn"),
+        ];
+        assert_eq!(
+            r.resolve("src/task.rs", &named("poll", spawn()), &other),
+            vec![0, 1]
+        );
+        // `&self` (trait) is found before `&mut self` (inherent): both stay.
+        assert_eq!(
+            r.resolve("src/task.rs", &named("get", spawn()), &d(4, 10)),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn a_typed_chain_also_prefers_the_inherent_method_but_not_across_impl_targets() {
+        let src = "pub struct Spawn<T>(T);\n\
+                   pub fn spawn() -> Spawn<u8> { todo!() }\n\
+                   impl<T> Spawn<T> {\n    pub fn poll(&mut self) {}\n    pub fn f(&mut self) {}\n}\n\
+                   impl<T> Future for Spawn<T> {\n    fn poll(self: Pin<&mut Self>) {}\n}\n\
+                   impl Tr for Spawn<u8> {\n    fn f(&self) {}\n}\n";
+        let r = Resolver::new(&index(vec![FileEntry {
+            path: "src/task.rs".into(),
+            symbols: crate::lang::extract(crate::lang::Lang::Rust, src)
+                .unwrap()
+                .symbols,
+            ..Default::default()
+        }]));
+        let d = |a, b| {
+            vec![
+                in_type("src/task.rs", a, "Spawn"),
+                in_type("src/task.rs", b, "Spawn"),
+            ]
+        };
+        let made = |callee: &str| Call {
+            callee: callee.into(),
+            ..chained(Form::Returned(hop("spawn", Form::Bare, false)))
+        };
+        assert_eq!(r.resolve("src/task.rs", &made("poll"), &d(4, 8)), vec![0]);
+        // `Spawn<T>` and `Spawn<u8>` blocks are not compared: both stay.
+        assert_eq!(r.resolve("src/task.rs", &made("f"), &d(5, 11)), vec![0, 1]);
+    }
+
+    #[test]
+    fn receiver_steps_follow_rusts_lookup_order() {
+        let step = |sig: &str| receiver_step(sig);
+        assert_eq!(step("fn a(self)"), Some(0));
+        assert_eq!(step("fn a(mut self, x: u8)"), Some(0));
+        assert_eq!(step("fn a(&self)"), Some(1));
+        assert_eq!(step("fn a(&'a self)"), Some(1));
+        assert_eq!(step("fn a(&mut self)"), Some(2));
+        assert_eq!(step("fn a(&'a mut self)"), Some(2));
+        assert_eq!(step("fn a(self: &Self)"), Some(1));
+        assert_eq!(step("fn a(self: &mut Self)"), Some(2));
+        assert_eq!(step("fn a(self: Pin<&mut Self>)"), Some(3));
+        assert_eq!(step("fn a(x: u8)"), None);
+    }
+
+    #[test]
+    fn a_trait_after_an_impl_is_not_inside_it() {
+        let file = FileEntry {
+            path: "src/a.rs".into(),
+            symbols: crate::lang::extract(
+                crate::lang::Lang::Rust,
+                "impl Foo for Bar {\n    fn m(&self) {}\n}\ntrait Bar {\n    fn m(&self) {}\n}\n",
+            )
+            .unwrap()
+            .symbols,
+            ..Default::default()
+        };
+        let got = receivers_of(&file);
+        assert!(got.contains_key(&2) && !got.contains_key(&5), "{got:?}");
     }
 
     /// A TypeScript file as the extractor sees it.

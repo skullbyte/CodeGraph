@@ -41,11 +41,12 @@ Rules stay the same: failing test first, `just check`, `code-reviewer` loop, no 
 ## E. Precision (the user's top goal; hardest items, best done with the strongest model)
 - [x] E1. Done 2026-11-13 (steps 1-4: return types, chains, call-made locals incl. top level, `Symbol.bases` + `members_up`, VERSION 10). zod form 8% -> 9% right, wrong 8% unchanged; type calls 4% -> 88% right; chains 7737 calls at 5% right / 0% wrong (blocked by E1b). tokio and this repo unchanged.
 - [x] E1b. Done 2026-11-14. Package names (every package.json) + TS re-export following (`src/tspath.rs`), plan `~/.claude/plans/graceful-jingling-sifakis.md`: zod form 9% -> 60% right, wrong 8% -> 6%. Left: `import { z } from "zod/v3"` used as a namespace (named import of a namespace object); local `export { a }` of an imported name; `export =`/CommonJS re-exports; `Form::Type` in TS does not use `home` (caller's file) yet; method calls on untyped values (zod method row 4% right / 44% wrong, 1932 calls) are the biggest wrong bucket left.
-- [ ] E2. Rust type identity: several `Builder`/`Runtime` types share a name (3,517 tokio calls). Needs type = (file, name), not name.
+- [~] E2. 2026-11-14: inherent methods now hide same-target trait-impl methods (tokio 64 -> 67%). Still open: Rust type identity: several `Builder`/`Runtime` types share a name (3,517 tokio calls). Needs type = (file, name), not name.
 - [ ] E3. Rust `macro_rules!` definitions as symbols (1,122 unscored tokio answers) and receivers inside macro arguments (2,845 misses).
 - [ ] E4. Fields of generic structs; tuple patterns after `..`.
 - [ ] E5. Forms for Java/Kotlin/Go/C#/C++/Ruby/PHP/Swift. Blocked: scoring needs SCIP indexers that run the project's build; the user must OK each (`scip-java`, `scip-go`, `scip-clang`, `scip-dotnet`).
 - [ ] E6. File explain ("ask about a file"), promised 2026-11-01.
+- [ ] E8. TS: a parameter typed by a constrained generic (`schema: T`, `T extends z.ZodType`) could use the constraint; v3-style `export { stringType as string }` (local renamed export) is not followed by `src/tspath.rs`.
 - [ ] E7. Stemming for `query` ("notifies" should match `notify`).
 
 ## F. Graphify parity (39/118 = 33%), in the user's order

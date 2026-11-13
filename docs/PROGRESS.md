@@ -3,11 +3,10 @@
 ## Now
 Task: E1, plan `~/.claude/plans/refactored-cooking-umbrella.md` (approved 2026-11-12, 4 steps). Steps 1+2 committed in bd020c2 (not pushed): TS `returns_of` + `hop_of`/`Form::Returned` in `call_form`; `just check` green (495 lib + 44 cli).
 zod after 1+2: form still 8% right / 8% wrong; new "chain" row 3866 calls: 6% right, 0% wrong, 94% narrowed (needs step 4, inheritance).
-Task: E1b (plan `~/.claude/plans/graceful-jingling-sifakis.md`, approved 2026-11-14): TS package names + re-export following. E1 committed (17e58c6, rules split 26e9973), not pushed.
-E1b state 2026-11-14, uncommitted: steps 1-4 done (package.json aliases incl. root one past .gitignore, exact file aliases, TS `uses`, new `src/tspath.rs`, resolver uses it for TS Module/Bare, `type_files` + `members_up(.., home)`, overload group takes the annotated implementation's return type (user)). `just check` 513 lib + 44 cli; binary installed.
-zod: form right 60% / wrong 6% (E1 start 8/8); chain 50/0, module 83/2, bare 70/0, type 88/3. tokio 64/0, this repo 96/0 (new test call sites), index tokio cached 33 ms, update 7.1 ms (+1.3 ms: package.json walk), zod index 19 ms.
-code-reviewer: 2 rounds, "no remaining issues" (fixed: package targets must be indexable files, .d.ts last). Committed with this note.
-Next step: pick the next precision item (see TODO E: TS method calls on untyped values are zod's biggest wrong bucket; then E2 Rust type identity).
+Session 2026-11-14 (autonomous, user asked to continue unsupervised): committed E1b (d6ac29b), bare-index namespace fix (a04b2c9), Rust inherent-before-trait methods (this commit). Not pushed.
+zod: form right 65% / wrong 3% (E1 start 8/8). tokio: 67% / 0% (was 64/0; chains 56 -> 66%). This repo 96/0.
+Rust rule: `Resolver::inherent_first` + `receivers_of`/`receiver_step` (scope.rs): an inherent method hides a trait-impl method of the same impl target (same file) reached at the same or a later receiver step; only for a known receiver type (Type/SelfRef/typed chain).
+Next step: remaining tokio misses: method row (2323 calls, 7% right: closure params, macro bodies = E3, fields of fields), chain narrowed 22%; zod: v3 renamed local exports (`export { stringType as string }`), generic params with constraints (`T extends z.ZodType`).
 Scores (tokio form): right 64% / wrong 0% / narrowed 22% / lost 0%; this repo 97% right; zod 8%. SCIP on this repo: 14454 of 14973 calls resolved (2026-11-12).
 `origin` = github.com/skullbyte/CodeGraph; `main` tracks `origin/main`, pushed up to 98b3143, bd020c2 local only (user pushes with `! git push`).
 Rules: tests first, model `opusplan` (opus only for hard tasks, chosen before the first message), `code-reviewer` (sonnet, diff only, max 3 rounds) until "no remaining issues", commit by file name, no AI attribution, never push unless asked, `cargo add` only by the user with `!`.
